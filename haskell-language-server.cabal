@@ -680,9 +680,11 @@ test-suite hls-inline-function-plugin-tests
   hs-source-dirs:   plugins/hls-inline-function-plugin/test
   main-is:          Main.hs
   build-depends:
+    , filepath
     , ghcide
     , haskell-language-server:hls-inline-function-plugin
     , hls-test-utils             == 2.14.0.0
+    , lsp-types
     , text
   default-extensions:
     DerivingStrategies
