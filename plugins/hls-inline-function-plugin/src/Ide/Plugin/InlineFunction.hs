@@ -24,6 +24,7 @@ import           Development.IDE.Core.RuleTypes    (GetHieAst (..),
                                                     TcModuleResult (..),
                                                     TypeCheck (..))
 import           Development.IDE.GHC.ExactPrint    (GetAnnotatedParsedSource (..))
+import qualified Development.IDE.GHC.ExactPrint    as E
 import           Ide.Logger                        (Pretty (..), Recorder,
                                                     WithPriority, cmapWithPrio,
                                                     logWith)
@@ -42,18 +43,23 @@ import           GHC.Generics                      (Generic)
 import qualified Data.Map                          as M
 import qualified Data.Text                         as T
 import           Development.IDE.GHC.Compat
+import           Development.IDE.Plugin.CodeAction (mkExactprintPluginDescriptor)
 import           Ide.Plugin.InlineFunction.Resolve (InlineCandidate (name),
                                                     findInlineCandidate)
 import           Ide.Plugin.InlineFunction.Rewrite (buildEdits)
 import qualified Ide.Plugin.Resolve                as Resolve
 import qualified Language.LSP.Protocol.Lens        as L
 
-data Log = forall a. Pretty a => LogResolve a | LogBuildEditsFailed String
+data Log
+    = LogExactPrint E.Log
+    | forall a. Pretty a => LogResolve a
+    | LogBuildEditsFailed String
 
 instance Pretty Log where
     pretty = \case
-      LogResolve l          -> pretty l
-      LogBuildEditsFailed e -> "buildEdits failed:" Logger.<+> pretty e
+        LogExactPrint l       -> pretty l
+        LogResolve l          -> pretty l
+        LogBuildEditsFailed e -> "buildEdits failed:" Logger.<+> pretty e
 
 -- | Data passed back from the client as part of the resolve stage.
 newtype InlineResolveData = InlineResolveData { irdPos :: Position }
@@ -63,13 +69,15 @@ newtype InlineResolveData = InlineResolveData { irdPos :: Position }
 -- | Plugin descriptor
 descriptor :: Recorder (WithPriority Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder plId =
-    (defaultPluginDescriptor plId "Provides a code action to inline functions")
-        { pluginHandlers =
-            Resolve.mkCodeActionHandlerWithResolve
-                (cmapWithPrio LogResolve recorder)
-                codeAction
-                (resolveProvider recorder)
-        }
+    -- Provides access to GetAnnotatedParsedSource
+    mkExactprintPluginDescriptor (cmapWithPrio LogExactPrint recorder) $
+        (defaultPluginDescriptor plId "Provides a code action to inline functions")
+            { pluginHandlers =
+                Resolve.mkCodeActionHandlerWithResolve
+                    (cmapWithPrio LogResolve recorder)
+                    codeAction
+                    (resolveProvider recorder)
+            }
 
 -- | For the given cursor position, determine if there is a function here that
 -- could be inlined. If so, provide the details to display to the user.
