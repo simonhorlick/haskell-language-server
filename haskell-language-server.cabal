@@ -656,6 +656,9 @@ library hls-inline-function-plugin
   if !flag(inlineFunction)
     buildable: False
   exposed-modules:  Ide.Plugin.InlineFunction
+  other-modules:
+    Ide.Plugin.InlineFunction.Resolve
+    Ide.Plugin.InlineFunction.Rewrite
   hs-source-dirs:   plugins/hls-inline-function-plugin/src
   default-extensions:
     DerivingStrategies
@@ -666,7 +669,9 @@ library hls-inline-function-plugin
     , containers
     , ghc
     , ghcide                == 2.14.0.0
+    , haskell-language-server:hls-refactor-plugin
     , hls-plugin-api        == 2.14.0.0
+    , lens                  ^>= 5.3.6
     , lsp-types
     , text
     , transformers
