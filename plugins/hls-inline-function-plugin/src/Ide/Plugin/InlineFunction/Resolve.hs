@@ -3,8 +3,18 @@ module Ide.Plugin.InlineFunction.Resolve
     , InlineCandidate(..)
     ) where
 
-import           Development.IDE.Core.RuleTypes  (HieAstResult)
-import           Development.IDE.GHC.Compat.Core (Name, RenamedSource)
+import qualified Data.Map                        as M
+import           Data.Maybe                      (listToMaybe)
+import qualified Data.Set                        as S
+import           Development.IDE.Core.RuleTypes  (HieAstResult (..))
+import           Development.IDE.GHC.Compat      (getSourceNodeIds)
+import           Development.IDE.GHC.Compat.Core (Name, RealSrcSpan,
+                                                  RenamedSource)
+import           Development.IDE.Spans.AtPoint   (pointCommand)
+import           GHC.Iface.Ext.Types             (ContextInfo (..), HieAST,
+                                                  Identifier,
+                                                  IdentifierDetails (identInfo))
+import qualified GHC.Iface.Ext.Types             as Hie
 import           Language.LSP.Protocol.Types     (Position)
 
 -- | A resolved candidate for inlining.
@@ -19,4 +29,28 @@ findInlineCandidate
     -> RenamedSource
     -> Position
     -> Maybe InlineCandidate
-findInlineCandidate har rn pos = Nothing
+findInlineCandidate HAR{hieAst} _rn pos = do
+  -- Extract the identifiers under the cursor
+  let point = concat $ pointCommand hieAst pos extractIdents
+  -- Filter out the Left from identifiers (we only want Name, not ModuleName)
+  let names = [(n, ctxs, sp) | (Right n, ctxs, sp) <- point
+        -- Restrict to valid contexts
+        , isInlineSite ctxs
+        -- Omit Identifiers that are types
+       ]
+  -- Take the first result
+  (name, callSpan, ctxs) <- listToMaybe names
+  pure InlineCandidate
+      { name = name
+      }
+
+-- | Extract identifiers and their spans from the AST.
+extractIdents :: HieAST a -> [(Identifier, [ContextInfo], RealSrcSpan)]
+extractIdents ast = map toEntry (M.toList (getSourceNodeIds ast))
+  where
+    toEntry (ident, det) = (ident, S.toList (identInfo det), Hie.nodeSpan ast)
+
+isInlineSite :: [ContextInfo] -> Bool
+isInlineSite = any $ \case
+    Use       -> True -- regular variable (what does this mean?)
+    _         -> False

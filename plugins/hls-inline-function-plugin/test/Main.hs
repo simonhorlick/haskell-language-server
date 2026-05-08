@@ -36,7 +36,32 @@ runTest title action file pos =
         action  <- pickAction action actions
         executeCodeAction action
 
+actionTitles :: [L.Command L.|? L.CodeAction] -> [T.Text]
+actionTitles xs = [t | L.InR L.CodeAction{_title = t} <- xs]
+
+runActionTest :: TestName -> FilePath -> Position -> TestTree
+runActionTest title file pos =
+    testCase title $ runInlineSession $ do
+        doc     <- openDoc (file ++ ".hs") "haskell"
+        _       <- waitForBuildQueue
+        actions <- getCodeActions doc (L.Range pos pos)
+        liftIO $ filter ("Inline " `T.isPrefixOf`) (actionTitles actions) @?= []
+
+runInlineSession :: Session a -> IO a
+runInlineSession =
+    runSessionWithTestConfig def
+        { testDirLocation      = Left testDataDir
+        , testPluginDescriptor = plugin
+        , testConfigCaps       = codeActionNoResolveCaps
+        }
+        . const
+
 test :: TestTree
 test = testGroup "inline-function" [
-    runTest "Inline top-level definition" "Inline foo" "TopLevelCall" (Position 6 7)
+    testGroup "resolve" [
+      runTest "Inline top-level definition" "Inline foo" "TopLevelCall" (Position 6 7)
+    ]
+  , testGroup "action" [
+      runActionTest "Type signature offers no Inline action" "TopLevelCall" (Position 2 7)
+    ]
   ]
