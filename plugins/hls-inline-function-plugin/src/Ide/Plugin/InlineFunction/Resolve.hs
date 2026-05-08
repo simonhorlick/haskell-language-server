@@ -9,7 +9,8 @@ import qualified Data.Set                        as S
 import           Development.IDE.Core.RuleTypes  (HieAstResult (..))
 import           Development.IDE.GHC.Compat      (getSourceNodeIds)
 import           Development.IDE.GHC.Compat.Core (Name, RealSrcSpan,
-                                                  RenamedSource)
+                                                  RenamedSource, isTyConName,
+                                                  isTyVarName)
 import           Development.IDE.Spans.AtPoint   (pointCommand)
 import           GHC.Iface.Ext.Types             (ContextInfo (..), HieAST,
                                                   Identifier,
@@ -37,6 +38,7 @@ findInlineCandidate HAR{hieAst} _rn pos = do
         -- Restrict to valid contexts
         , isInlineSite ctxs
         -- Omit Identifiers that are types
+        , not (isTyConName n || isTyVarName n)
        ]
   -- Take the first result
   (name, callSpan, ctxs) <- listToMaybe names
