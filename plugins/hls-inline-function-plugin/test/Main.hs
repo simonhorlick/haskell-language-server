@@ -39,13 +39,13 @@ runTest title action file pos =
 actionTitles :: [L.Command L.|? L.CodeAction] -> [T.Text]
 actionTitles xs = [t | L.InR L.CodeAction{_title = t} <- xs]
 
-runActionTest :: TestName -> FilePath -> Position -> TestTree
-runActionTest title file pos =
+runActionTest :: TestName -> FilePath -> Position -> [T.Text] -> TestTree
+runActionTest title file pos expected =
     testCase title $ runInlineSession $ do
         doc     <- openDoc (file ++ ".hs") "haskell"
         _       <- waitForBuildQueue
         actions <- getCodeActions doc (L.Range pos pos)
-        liftIO $ filter ("Inline " `T.isPrefixOf`) (actionTitles actions) @?= []
+        liftIO $ filter ("Inline " `T.isPrefixOf`) (actionTitles actions) @?= expected
 
 runInlineSession :: Session a -> IO a
 runInlineSession =
@@ -60,8 +60,18 @@ test :: TestTree
 test = testGroup "inline-function" [
     testGroup "resolve" [
       runTest "Inline top-level definition" "Inline foo" "TopLevelCall" (Position 6 7)
+    , runTest "Inline constant" "Inline a" "Constant" (Position 6 10)
+    , runTest "Rename variables that would be incorrectly captured after substitution" "Inline a" "Capture" (Position 6 11)
+    , runTest "Inlines an infix function correctly" "Inline add" "Infix" (Position 6 12)
     ]
   , testGroup "action" [
-      runActionTest "Type signature offers no Inline action" "TopLevelCall" (Position 2 7)
+      runActionTest "Type signature offers no Inline action" "TopLevelCall" (Position 2 7) []
+    , runActionTest "Variables offer no Inline action" "TopLevelCall" (Position 3 8) []
+    , runActionTest "Offers inlining at definition" "Constant" (Position 3 0) ["Inline a"]
+    , runActionTest "Recursive functions cannot be inlined" "Recursive" (Position 6 9) []
+    , runActionTest "Functions consisting of guards cannot be inlined" "Guards" (Position 8 6) []
+    , runActionTest "Pattern bindings cannot be inlined" "PatternBind" (Position 5 9) []
+    , runActionTest "Bindings with multiple clauses cannot be inlined" "MultiClause" (Position 7 9) []
+    , runActionTest "Imported names cannot be inlined" "Imported" (Position 5 14) []
     ]
   ]

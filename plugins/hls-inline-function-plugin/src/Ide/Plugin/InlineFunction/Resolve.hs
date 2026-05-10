@@ -39,6 +39,7 @@ findInlineCandidate HAR{hieAst} _rn pos = do
         , isInlineSite ctxs
         -- Omit Identifiers that are types
         , not (isTyConName n || isTyVarName n)
+        -- TODO: Omit Identifiers that are not functions
        ]
   -- Take the first result
   (name, callSpan, ctxs) <- listToMaybe names
@@ -54,5 +55,7 @@ extractIdents ast = map toEntry (M.toList (getSourceNodeIds ast))
 
 isInlineSite :: [ContextInfo] -> Bool
 isInlineSite = any $ \case
-    Use       -> True -- regular variable (what does this mean?)
+    -- Emit the action at the site of a variable usage.
+    Use       -> True
+    -- TODO: Emit the action at the site of the function definition.
     _         -> False
