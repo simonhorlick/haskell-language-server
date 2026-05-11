@@ -655,7 +655,9 @@ library hls-inline-function-plugin
   import:           defaults, pedantic, warnings
   if !flag(inlineFunction)
     buildable: False
-  exposed-modules:  Ide.Plugin.InlineFunction
+  exposed-modules:
+    Ide.Plugin.InlineFunction
+    Ide.Plugin.InlineFunction.Util
   other-modules:
     Ide.Plugin.InlineFunction.Resolve
     Ide.Plugin.InlineFunction.Rewrite
@@ -663,16 +665,20 @@ library hls-inline-function-plugin
   default-extensions:
     DerivingStrategies
     LambdaCase
+    OverloadedRecordDot
     OverloadedStrings
   build-depends:
     , aeson
     , containers
+    , extra
     , ghc
     , ghcide                == 2.14.0.0
     , haskell-language-server:hls-refactor-plugin
+    , ghc-exactprint
     , hls-plugin-api        == 2.14.0.0
     , lens                  ^>= 5.3.6
     , lsp-types
+    , syb
     , text
     , transformers
 
@@ -686,7 +692,8 @@ test-suite hls-inline-function-plugin-tests
   main-is:          Main.hs
   build-depends:
     , filepath
-    , ghcide
+    , ghc-exactprint
+    , ghc-paths
     , haskell-language-server:hls-inline-function-plugin
     , hls-test-utils             == 2.14.0.0
     , lsp-types

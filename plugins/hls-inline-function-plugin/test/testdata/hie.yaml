@@ -1,0 +1,20 @@
+# required for HLS to be able to typecheck and inspect the AST of the testdata
+# files.
+cradle:
+  direct:
+    arguments:
+      - ArgParens
+      - Capture
+      - Constant
+      - DoBlock
+      - Guards
+      - Imported
+      - Infix
+      - Let
+      - MultiClause
+      - Parenthesis
+      - PatternBind
+      - Pointfree
+      - Recursive
+      - Shadow
+      - TopLevelCall
