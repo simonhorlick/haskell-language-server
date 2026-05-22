@@ -18,4 +18,4 @@ cradle:
       - Pointfree
       - Recursive
       - Shadow
-      - TopLevelCall
+      - TopLevel

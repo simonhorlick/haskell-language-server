@@ -1,4 +1,4 @@
-module TopLevelCall where
+module TopLevel where
 
 foo :: Int -> Int
 foo x = x + 1

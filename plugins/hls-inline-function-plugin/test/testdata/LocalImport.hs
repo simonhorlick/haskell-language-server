@@ -1,5 +1,5 @@
 module LocalImport where
 
-import TopLevelCall
+import TopLevel
 
 f x = foo x

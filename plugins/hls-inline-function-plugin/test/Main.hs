@@ -104,7 +104,7 @@ unitTests = testGroup "addParens" [
 
 resolveTests :: TestTree
 resolveTests = testGroup "resolve" [
-    runTest "Inline top-level definition" "Inline foo" "TopLevelCall" (Position 6 7)
+    runTest "Inline top-level definition" "Inline foo" "TopLevel" (Position 6 7)
   , runTest "Inline constant" "Inline a" "Constant" (Position 6 10)
   , runTest "Rename variables that would be incorrectly captured after substitution" "Inline addOne" "Capture" (Position 6 11)
   , runTest "Doesn't rename shadowed identifier" "Inline idy" "Shadow" (Position 6 11)
@@ -124,8 +124,8 @@ resolveTests = testGroup "resolve" [
 
 actionTests :: TestTree
 actionTests = testGroup "action" [
-    runActionTest "Type signature offers no Inline action" "TopLevelCall" (Position 2 7) []
-  , runActionTest "Variables offer no Inline action" "TopLevelCall" (Position 3 8) []
+    runActionTest "Type signature offers no Inline action" "TopLevel" (Position 2 7) []
+  , runActionTest "Variables offer no Inline action" "TopLevel" (Position 3 8) []
   , runActionTest "Offers inlining at definition" "Constant" (Position 3 0) ["Inline a"]
   , runActionTest "Recursive functions cannot be inlined" "Recursive" (Position 6 9) []
   , runActionTest "Functions consisting of guards cannot be inlined" "Guards" (Position 8 6) []
