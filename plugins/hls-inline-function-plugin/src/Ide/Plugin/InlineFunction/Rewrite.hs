@@ -81,7 +81,8 @@ inlineCallSite bd body ps site = do
 -- foo noting down names that are introduced and their scopes. If an introduced
 -- name clashes with an argument, we simply assign a fresh name to it in the
 -- body. In this example, when inlining foo, we rename y ↦ y' in the let
--- binding.
+-- binding, resulting in:
+--   bar y = let y' = 1 in y
 substituteParamsInBody
   :: BindingDef
   -> [LHsExpr GhcPs]
