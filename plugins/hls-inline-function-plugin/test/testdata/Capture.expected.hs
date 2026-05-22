@@ -4,4 +4,4 @@ addOne :: Int -> Int
 addOne x = let y = 1 in y + x
 
 result :: Int -> Int
-result y = let y' = 1 in y' + y
+result y = let x = y in let y = 1 in y + x

@@ -138,6 +138,7 @@ actionTests = testGroup "action" [
   , runActionTest "Functions with no call sites offer no Inline action" "Uncalled" (Position 3 0) []
   -- TODO(simonhorlick): not yet implemented
   , runActionTest "Definitions imported from local modules do not offer inlining" "LocalImport" (Position 4 6) []
+  , runActionTest "Does not offer inlining of a let binding that would cause a capture error" "Let3" (Position 5 15) []
   ]
 
 test :: TestTree
