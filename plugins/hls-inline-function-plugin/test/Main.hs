@@ -102,35 +102,41 @@ unitTests = testGroup "addParens" [
       printed @?= "x"
   ]
 
+resolveTests :: TestTree
+resolveTests = testGroup "resolve" [
+    runTest "Inline top-level definition" "Inline foo" "TopLevelCall" (Position 6 7)
+  , runTest "Inline constant" "Inline a" "Constant" (Position 6 10)
+  , runTest "Rename variables that would be incorrectly captured after substitution" "Inline addOne" "Capture" (Position 6 11)
+  , runTest "Doesn't rename shadowed identifier" "Inline idy" "Shadow" (Position 6 11)
+  , runTest "Inlines an infix function correctly" "Inline add" "Infix" (Position 6 12)
+  , runTest "Inlines let expression correctly" "Inline addOne" "Let" (Position 6 9)
+  , runTest "Inlines parenthesized expression correctly" "Inline mul" "Parenthesis" (Position 6 9)
+  , runTest "Inlines point free function correctly" "Inline trip" "Pointfree" (Position 11 7)
+  , runTest "Parenthesizes the inlined body when the context requires it" "Inline addOne" "BodyParens" (Position 6 14)
+  , runTest "Parenthesizes a function-application argument substituted into the body" "Inline combine" "ArgParens" (Position 9 15)
+  , runTest "Inlines callsites in do-blocks correctly" "Inline foo" "DoBlock" (Position 5 11)
+  -- Currently duplicates the argument expression at each occurrence. In order
+  -- to retain exactly the same behaviour this could be pulled out into a let
+  -- binding.
+  , runTest "Duplicates the argument when a parameter is used multiple times" "Inline double" "DuplicateArg" (Position 8 10)
+  ]
+
+actionTests :: TestTree
+actionTests = testGroup "action" [
+    runActionTest "Type signature offers no Inline action" "TopLevelCall" (Position 2 7) []
+  , runActionTest "Variables offer no Inline action" "TopLevelCall" (Position 3 8) []
+  , runActionTest "Offers inlining at definition" "Constant" (Position 3 0) ["Inline a"]
+  , runActionTest "Recursive functions cannot be inlined" "Recursive" (Position 6 9) []
+  , runActionTest "Functions consisting of guards cannot be inlined" "Guards" (Position 8 6) []
+  , runActionTest "Pattern bindings cannot be inlined" "PatternBind" (Position 5 9) []
+  , runActionTest "Bindings with multiple clauses cannot be inlined" "MultiClause" (Position 7 9) []
+  , runActionTest "Imported names cannot be inlined" "Imported" (Position 5 14) []
+  , runActionTest "Functions with no call sites offer no Inline action" "Uncalled" (Position 3 0) []
+  ]
+
 test :: TestTree
 test = testGroup "inline-function" [
     unitTests
-  , testGroup "resolve" [
-      runTest "Inline top-level definition" "Inline foo" "TopLevelCall" (Position 6 7)
-    , runTest "Inline constant" "Inline a" "Constant" (Position 6 10)
-    , runTest "Rename variables that would be incorrectly captured after substitution" "Inline addOne" "Capture" (Position 6 11)
-    , runTest "Doesn't rename shadowed identifier" "Inline idy" "Shadow" (Position 6 11)
-    , runTest "Inlines an infix function correctly" "Inline add" "Infix" (Position 6 12)
-    , runTest "Inlines let expression correctly" "Inline addOne" "Let" (Position 6 9)
-    , runTest "Inlines parenthesized expression correctly" "Inline mul" "Parenthesis" (Position 6 9)
-    , runTest "Inlines point free function correctly" "Inline trip" "Pointfree" (Position 11 7)
-    , runTest "Parenthesizes the inlined body when the context requires it" "Inline addOne" "BodyParens" (Position 6 14)
-    , runTest "Parenthesizes a function-application argument substituted into the body" "Inline combine" "ArgParens" (Position 9 15)
-    , runTest "Inlines callsites in do-blocks correctly" "Inline foo" "DoBlock" (Position 5 11)
-    -- Currently duplicates the argument expression at each occurrence. In order
-    -- to retain exactly the same behaviour this could be pulled out into a let
-    -- binding.
-    , runTest "Duplicates the argument when a parameter is used multiple times" "Inline double" "DuplicateArg" (Position 8 10)
-  ]
-  , testGroup "action" [
-      runActionTest "Type signature offers no Inline action" "TopLevelCall" (Position 2 7) []
-    , runActionTest "Variables offer no Inline action" "TopLevelCall" (Position 3 8) []
-    , runActionTest "Offers inlining at definition" "Constant" (Position 3 0) ["Inline a"]
-    , runActionTest "Recursive functions cannot be inlined" "Recursive" (Position 6 9) []
-    , runActionTest "Functions consisting of guards cannot be inlined" "Guards" (Position 8 6) []
-    , runActionTest "Pattern bindings cannot be inlined" "PatternBind" (Position 5 9) []
-    , runActionTest "Bindings with multiple clauses cannot be inlined" "MultiClause" (Position 7 9) []
-    , runActionTest "Imported names cannot be inlined" "Imported" (Position 5 14) []
-    , runActionTest "Functions with no call sites offer no Inline action" "Uncalled" (Position 3 0) []
-  ]
+  , resolveTests
+  , actionTests
   ]
