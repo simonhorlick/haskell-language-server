@@ -33,6 +33,7 @@
 /plugins/hls-qualify-imported-names-plugin @eddiemundo
 /plugins/hls-refactor-plugin @santiweight
 /plugins/hls-rename-plugin
+/plugins/hls-inline-function-plugin @simonhorlick
 /plugins/hls-semantic-tokens-plugin @soulomoon
 /plugins/hls-signature-help-plugin @jian-lin
 /plugins/hls-splice-plugin @konn

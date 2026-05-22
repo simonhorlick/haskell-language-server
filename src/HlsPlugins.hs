@@ -41,6 +41,10 @@ import qualified Ide.Plugin.ExplicitImports        as ExplicitImports
 import qualified Ide.Plugin.Rename                 as Rename
 #endif
 
+#if hls_inlineFunction
+import qualified Ide.Plugin.InlineFunction         as InlineFunction
+#endif
+
 #if hls_hlint
 import qualified Ide.Plugin.Hlint                  as Hlint
 #endif
@@ -176,6 +180,9 @@ idePlugins recorder = pluginDescToIdePlugins allPlugins
 #endif
 #if hls_rename
       let pId = "rename" in Rename.descriptor (pluginRecorder pId) pId:
+#endif
+#if hls_inlineFunction
+      let pId = "inlineFunction" in InlineFunction.descriptor (pluginRecorder pId) pId:
 #endif
 #if hls_callHierarchy
       CallHierarchy.descriptor "callHierarchy" :

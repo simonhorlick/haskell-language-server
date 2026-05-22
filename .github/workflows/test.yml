@@ -194,6 +194,10 @@ jobs:
         name: Test hls-rename-plugin test suite
         run: cabal test ${CABAL_ARGS} hls-rename-plugin-tests || cabal test ${CABAL_ARGS} hls-rename-plugin-tests
 
+      - if: matrix.test
+        name: Test hls-inline-function-plugin test suite
+        run: cabal test ${CABAL_ARGS} hls-inline-function-plugin-tests || cabal test ${CABAL_ARGS} hls-inline-function-plugin-tests
+
       # Hlint will never work on GHC 9.10
       - if: matrix.test && matrix.ghc != '9.10' && matrix.ghc != '9.14' && matrix.ghc != '9.10.2'
         name: Test hls-hlint-plugin test suite
