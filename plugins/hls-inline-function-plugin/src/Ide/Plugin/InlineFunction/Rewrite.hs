@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 -- | Build the @TextEdit@s that perform the actual source transformation to
 -- inline the function.
 module Ide.Plugin.InlineFunction.Rewrite
