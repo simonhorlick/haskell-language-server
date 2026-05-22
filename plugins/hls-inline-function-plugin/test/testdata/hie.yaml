@@ -11,6 +11,7 @@ cradle:
       - Imported
       - Infix
       - Let
+      - Let2
       - LocalImport
       - MultiClause
       - Parenthesis

@@ -120,6 +120,7 @@ resolveTests = testGroup "resolve" [
   -- binding.
   , runTest "Duplicates the argument when a parameter is used multiple times" "Inline double" "DuplicateArg" (Position 8 10)
   , runTest "Offers inlining for type class methods" "Inline identity" "Class" (Position 6 13)
+  , runTest "Offers inlining for let bindings" "Inline y" "Let2" (Position 5 5)
   ]
 
 actionTests :: TestTree
