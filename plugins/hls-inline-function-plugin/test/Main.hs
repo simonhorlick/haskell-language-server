@@ -119,6 +119,7 @@ resolveTests = testGroup "resolve" [
   -- to retain exactly the same behaviour this could be pulled out into a let
   -- binding.
   , runTest "Duplicates the argument when a parameter is used multiple times" "Inline double" "DuplicateArg" (Position 8 10)
+  , runTest "Offers inlining for type class methods" "Inline identity" "Class" (Position 6 13)
   ]
 
 actionTests :: TestTree
@@ -136,7 +137,10 @@ actionTests = testGroup "action" [
 
 test :: TestTree
 test = testGroup "inline-function" [
+    -- self-contained tests that don't rely on the HLS
     unitTests
+    -- tests that invoke the action
   , resolveTests
+    -- tests that verify the code action is emitted
   , actionTests
   ]
