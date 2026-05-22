@@ -79,10 +79,13 @@ inlineCallSite bd body ps site = do
 -- argument 'y'. If we naively substitute x ↦ y in the body of foo, the 'y'
 -- will incorrectly refer to the let binding. To avoid this we walk the body of
 -- foo noting down names that are introduced and their scopes. If an introduced
--- name clashes with an argument, we simply assign a fresh name to it in the
--- body. In this example, when inlining foo, we rename y ↦ y' in the let
--- binding, resulting in:
---   bar y = let y' = 1 in y
+-- name clashes with an argument, we introduce a let binding at the inlining
+-- site and use the original name from the body.
+-- In this example,
+--   bar y = let x = y in let y = 1 in x
+--           ^^^^^^^^^^^^ additional binder to disambiguate
+-- The rationale for this is that the user can easily rename the y in the body
+-- and run the inline action again to remove the extra let binding.
 substituteParamsInBody
   :: BindingDef
   -> [LHsExpr GhcPs]
