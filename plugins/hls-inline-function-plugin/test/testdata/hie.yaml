@@ -4,9 +4,12 @@ cradle:
   direct:
     arguments:
       - ArgParens
+      - BodyParens
       - Capture
+      - Class
       - Constant
       - DoBlock
+      - DuplicateArg
       - Guards
       - Imported
       - Infix
@@ -14,9 +17,12 @@ cradle:
       - Let2
       - LocalImport
       - MultiClause
+      - Operator
       - Parenthesis
       - PatternBind
       - Pointfree
       - Recursive
       - Shadow
       - TopLevel
+      - Uncalled
+      - Where
