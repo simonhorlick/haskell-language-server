@@ -38,7 +38,6 @@ pickAction title actions =
     matches = filter (\a -> a._title == title) (codeActions actions)
   in case matches of
     [a] -> pure a
-    []  -> liftIO $ assertFailure $ "No code action with title: " <> T.unpack title
     xs  -> liftIO $ assertFailure $
              "Expected exactly one code action with title " <> show title
                <> ", got " <> show (length xs)
@@ -122,8 +121,9 @@ resolveTests = testGroup "resolve" [
   , runTest "Offers inlining for type class methods" "Inline identity" "Class" (Position 6 13)
   , runTest "Offers inlining for let bindings" "Inline y" "Let2" (Position 5 5)
   , runTest "Offers inlining for bindings in where clauses" "Inline foo" "Where" (Position 2 11)
-  , runTest "Offers inlining for operators" "Inline /*" "Operator" (Position 4 15)
+  , runTest "Offers inlining for operators" "Inline */" "Operator" (Position 4 15)
   , runTest "Offers inlining for qualified names" "Inline foo" "Qualified" (Position 5 9)
+  , runTest "Inlines a function that uses overloaded record fields" "Inline getName" "Overloaded" (Position 10 23)
   ]
 
 actionTests :: TestTree

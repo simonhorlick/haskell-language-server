@@ -18,6 +18,7 @@ cradle:
       - LocalImport
       - MultiClause
       - Operator
+      - Overloaded
       - Parenthesis
       - PatternBind
       - Pointfree
