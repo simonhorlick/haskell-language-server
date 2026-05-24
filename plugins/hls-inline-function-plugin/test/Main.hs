@@ -123,6 +123,7 @@ resolveTests = testGroup "resolve" [
   , runTest "Offers inlining for let bindings" "Inline y" "Let2" (Position 5 5)
   , runTest "Offers inlining for bindings in where clauses" "Inline foo" "Where" (Position 2 11)
   , runTest "Offers inlining for operators" "Inline /*" "Operator" (Position 4 15)
+  , runTest "Offers inlining for qualified names" "Inline foo" "Qualified" (Position 5 9)
   ]
 
 actionTests :: TestTree
