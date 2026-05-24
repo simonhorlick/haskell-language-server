@@ -142,6 +142,8 @@ actionTests = testGroup "action" [
   , runActionTest "Definitions imported from local modules do not offer inlining" "LocalImport" (Position 4 6) []
   , runActionTest "Does not offer inlining when a RecordWildCards binding in the body would capture an argument" "RecordWildCards" (Position 14 11) []
   , runActionTest "Does not offer inlining when there is a RecordWildCards binding in the arguments" "RecordWildCards2" (Position 15 11) []
+  -- TODO(simonhorlick): not yet implemented
+  , runActionTest "Does not offer inlining when a forall'd type variable in the body would be captured at the call site" "ImplicitForall" (Position 14 13) []
   ]
 
 test :: TestTree
