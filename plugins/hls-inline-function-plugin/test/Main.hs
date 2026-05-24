@@ -140,6 +140,8 @@ actionTests = testGroup "action" [
   -- TODO(simonhorlick): not yet implemented
   , runActionTest "Definitions imported from local modules do not offer inlining" "LocalImport" (Position 4 6) []
   , runActionTest "Does not offer inlining of a let binding that would cause a capture error" "Let3" (Position 5 15) []
+  , runActionTest "Does not offer inlining when a RecordWildCards binding in the body would capture an argument" "RecordWildCards" (Position 14 11) []
+  , runActionTest "Does not offer inlining when there is a RecordWildCards binding in the arguments" "RecordWildCards2" (Position 15 11) []
   ]
 
 test :: TestTree
