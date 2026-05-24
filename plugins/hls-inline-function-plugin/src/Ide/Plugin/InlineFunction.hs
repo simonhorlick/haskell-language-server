@@ -81,12 +81,12 @@ codeAction state _plId CodeActionParams{_textDocument, _range} = do
       pos = _range ^. L.start
   path <- getNormalizedFilePathE uri
   candidate <- liftIO $ runAction "InlineFunction.codeAction" state $ do
-    maybeAst <- use GetHieAst path
-    maybeTypecheck <- use TypeCheck path
+    maybeAst   <- use GetHieAst path
+    maybeCheck <- use TypeCheck path
     pure $ do
-      ast <- maybeAst
-      tcm <- maybeTypecheck
-      findInlineCandidate ast (tmrRenamed tcm) pos
+      ast   <- maybeAst
+      check <- maybeCheck
+      findInlineCandidate ast (tmrRenamed check) pos
   pure $
     InL $ case candidate of
       Nothing   -> []
