@@ -120,6 +120,7 @@ resolveTests = testGroup "resolve" [
   , runTest "Duplicates the argument when a parameter is used multiple times" "Inline double" "DuplicateArg" (Position 8 10)
   , runTest "Offers inlining for type class methods" "Inline identity" "Class" (Position 6 13)
   , runTest "Offers inlining for let bindings" "Inline y" "Let2" (Position 5 5)
+  , runTest "Handle capture for let bindings" "Inline x" "Let3" (Position 5 15)
   , runTest "Offers inlining for bindings in where clauses" "Inline foo" "Where" (Position 2 11)
   , runTest "Offers inlining for operators" "Inline */" "Operator" (Position 4 15)
   , runTest "Offers inlining for qualified names" "Inline foo" "Qualified" (Position 5 9)
@@ -139,7 +140,6 @@ actionTests = testGroup "action" [
   , runActionTest "Functions with no call sites offer no Inline action" "Uncalled" (Position 3 0) []
   -- TODO(simonhorlick): not yet implemented
   , runActionTest "Definitions imported from local modules do not offer inlining" "LocalImport" (Position 4 6) []
-  , runActionTest "Does not offer inlining of a let binding that would cause a capture error" "Let3" (Position 5 15) []
   , runActionTest "Does not offer inlining when a RecordWildCards binding in the body would capture an argument" "RecordWildCards" (Position 14 11) []
   , runActionTest "Does not offer inlining when there is a RecordWildCards binding in the arguments" "RecordWildCards2" (Position 15 11) []
   ]
