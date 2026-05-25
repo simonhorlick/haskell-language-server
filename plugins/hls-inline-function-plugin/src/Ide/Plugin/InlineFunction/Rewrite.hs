@@ -77,15 +77,14 @@ inlineCallSite bd body ps site = do
 --   bar y = foo y
 -- When we inline the body of foo, the 'y' in the let binding will shadow the
 -- argument 'y'. If we naively substitute x ↦ y in the body of foo, the 'y'
--- will incorrectly refer to the let binding. To avoid this we walk the body of
--- foo noting down names that are introduced and their scopes. If an introduced
--- name clashes with an argument, we introduce a let binding at the inlining
--- site and use the original name from the body.
+-- will incorrectly refer to the let binding. To avoid this we walk from the
+-- root to the target site (in the renamed source) accumulating binders
+-- introduced along the way with the collect* functions from ghc. Compute
+-- whether a free Name in the body shares an OccName with some binder
+-- introduced in the context. If so, generate a fresh name for this binder and
+-- rename all of it's occurances.
 -- In this example,
---   bar y = let x = y in let y = 1 in x
---           ^^^^^^^^^^^^ additional binder to disambiguate
--- The rationale for this is that the user can easily rename the y in the body
--- and run the inline action again to remove the extra let binding.
+--   bar y = let y' = 1 in y
 substituteParamsInBody
   :: BindingDef
   -> [LHsExpr GhcPs]
