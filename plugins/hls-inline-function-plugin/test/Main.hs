@@ -125,6 +125,7 @@ resolveTests = testGroup "resolve" [
   , runTest "Offers inlining for operators" "Inline */" "Operator" (Position 4 15)
   , runTest "Offers inlining for qualified names" "Inline foo" "Qualified" (Position 5 9)
   , runTest "Inlines a function that uses overloaded record fields" "Inline getName" "Overloaded" (Position 10 23)
+  , runTest "Renames a where-bound name that would capture a body free variable" "Inline addY" "CaptureWhere" (Position 14 11)
   ]
 
 actionTests :: TestTree

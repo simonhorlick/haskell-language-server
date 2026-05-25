@@ -6,4 +6,4 @@ double :: Int -> Int
 double x = x + x
 
 result :: Int
-result = (1 + 2) + (1 + 2)
+result = 1 + 2 + (1 + 2)
