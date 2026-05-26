@@ -12,4 +12,4 @@ useConfig :: Config -> Int -> Int
 useConfig c y = let Config{..} = c in x + y
 
 result :: Int -> Int
-result x = let Config {x = x1} = Config 10 in x1 + x
+result x = let Config{x = x1, ..} = Config 10 in x1 + x

@@ -133,6 +133,10 @@ resolveTests = testGroup "resolve" [
   , runTest "Inlines a call site inside a lambda body" "Inline addOne" "InLambda" (Position 6 23)
   , runTest "Inlines every call site that appears in a list literal" "Inline double" "ListLiteral" (Position 6 10)
   , runTest "Creates lambda for partially applied function" "Inline double" "Partial" (Position 6 9)
+  , runTest "Keeps parentheses around a right-associative body spliced onto the LHS" "Inline pow" "RightAssocOp" (Position 10 10)
+  , runTest "Inlines a fully-applied call written with '$'" "Inline double" "DollarApp" (Position 8 12)
+  , runTest "Renames a do-bound name in the body that would capture an argument" "Inline greet" "DoBlockCapture" (Position 13 4)
+  , runTest "Inlines mutually recursive bindings" "Inline ping" "MutualRecursion" (Position 9 9)
   ]
 
 actionTests :: TestTree
@@ -146,10 +150,8 @@ actionTests = testGroup "action" [
   , runActionTest "Bindings with multiple clauses cannot be inlined" "MultiClause" (Position 7 9) []
   , runActionTest "Imported names cannot be inlined" "Imported" (Position 5 14) []
   , runActionTest "Functions with no call sites offer no Inline action" "Uncalled" (Position 3 0) []
-  -- TODO(simonhorlick): not yet implemented
   , runActionTest "Definitions imported from local modules do not offer inlining" "LocalImport" (Position 4 6) []
   , runActionTest "Does not offer inlining when there is a RecordWildCards binding in the arguments" "RecordWildCards2" (Position 15 11) []
-  -- TODO(simonhorlick): not yet implemented
   , runActionTest "Does not offer inlining when a forall'd type variable in the body would be captured at the call site" "ImplicitForall" (Position 14 13) []
   ]
 

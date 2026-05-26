@@ -1,0 +1,11 @@
+module RightAssocOp where
+
+-- (^) is right-associative. Splicing '2 ^ x' onto the left of another '^'
+-- without parens reassociates: '(2 ^ 3) ^ 4' (= 4096) and
+-- '2 ^ 3 ^ 4' (= 2^81) are different programs. The plugin must keep the
+-- parentheses around the inlined body in this position.
+pow :: Int -> Int
+pow x = 2 ^ x
+
+result :: Int
+result = pow 3 ^ 4
