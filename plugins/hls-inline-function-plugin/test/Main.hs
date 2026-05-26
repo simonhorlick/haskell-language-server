@@ -106,7 +106,7 @@ resolveTests = testGroup "resolve" [
     runTest "Inline top-level definition" "Inline foo" "TopLevel" (Position 6 7)
   , runTest "Inline constant" "Inline a" "Constant" (Position 6 10)
   , runTest "Rename variables that would be incorrectly captured after substitution" "Inline addOne" "Capture" (Position 6 11)
-  , runTest "Doesn't rename shadowed identifier" "Inline idy" "Shadow" (Position 6 11)
+  , runTest "Doesn't rename shadowed identifier" "Inline idy" "Shadow" (Position 8 11)
   , runTest "Inlines an infix function correctly" "Inline add" "Infix" (Position 6 12)
   , runTest "Inlines let expression correctly" "Inline addOne" "Let" (Position 6 9)
   , runTest "Inlines parenthesized expression correctly" "Inline mul" "Parenthesis" (Position 6 9)
@@ -126,6 +126,13 @@ resolveTests = testGroup "resolve" [
   , runTest "Offers inlining for qualified names" "Inline foo" "Qualified" (Position 5 9)
   , runTest "Inlines a function that uses overloaded record fields" "Inline getName" "Overloaded" (Position 10 23)
   , runTest "Renames a where-bound name that would capture a body free variable" "Inline addY" "CaptureWhere" (Position 14 11)
+  , runTest "Renames a RecordWildCards binding in the body that would otherwise capture an argument" "Inline useConfig" "RecordWildCards" (Position 14 11)
+  , runTest "Moves a functions where clauses to a let binding when inlining" "Inline foo" "Where2" (Position 6 11)
+  , runTest "Inlines nested calls of the same function" "Inline addOne" "Nested" (Position 3 0)
+  , runTest "Inlines a call site inside a case branch" "Inline addOne" "CaseBranch" (Position 7 13)
+  , runTest "Inlines a call site inside a lambda body" "Inline addOne" "InLambda" (Position 6 23)
+  , runTest "Inlines every call site that appears in a list literal" "Inline double" "ListLiteral" (Position 6 10)
+  , runTest "Creates lambda for partially applied function" "Inline double" "Partial" (Position 6 9)
   ]
 
 actionTests :: TestTree
@@ -141,7 +148,6 @@ actionTests = testGroup "action" [
   , runActionTest "Functions with no call sites offer no Inline action" "Uncalled" (Position 3 0) []
   -- TODO(simonhorlick): not yet implemented
   , runActionTest "Definitions imported from local modules do not offer inlining" "LocalImport" (Position 4 6) []
-  , runActionTest "Does not offer inlining when a RecordWildCards binding in the body would capture an argument" "RecordWildCards" (Position 14 11) []
   , runActionTest "Does not offer inlining when there is a RecordWildCards binding in the arguments" "RecordWildCards2" (Position 15 11) []
   -- TODO(simonhorlick): not yet implemented
   , runActionTest "Does not offer inlining when a forall'd type variable in the body would be captured at the call site" "ImplicitForall" (Position 14 13) []

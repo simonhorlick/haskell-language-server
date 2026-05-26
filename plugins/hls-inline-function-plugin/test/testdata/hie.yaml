@@ -3,6 +3,7 @@
 cradle:
   direct:
     arguments:
+      - ArgNameClash
       - ArgParens
       - BodyParens
       - Capture
@@ -12,14 +13,19 @@ cradle:
       - DuplicateArg
       - Guards
       - Imported
+      - InLambda
       - Infix
       - Let
       - Let2
+      - Let3
+      - ListLiteral
       - LocalImport
       - MultiClause
+      - NestedCalls
       - Operator
       - Overloaded
       - Parenthesis
+      - Partial
       - PatternBind
       - Pointfree
       - Recursive
@@ -27,3 +33,4 @@ cradle:
       - TopLevel
       - Uncalled
       - Where
+      - Where2
