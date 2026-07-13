@@ -8,12 +8,16 @@ cradle:
       - BodyParens
       - Capture
       - Class
+      - ClassInstance
       - Constant
       - Cpp
       - CrossFileDef
       - CrossFileUse
       - DoBlock
       - DuplicateArg
+      - FixityDef
+      - FixityOther
+      - FixityUse
       - Guards
       - Imported
       - InLambda
@@ -34,9 +38,15 @@ cradle:
       - Partial
       - PatternBind
       - Pointfree
+      - QualifiedBodyDef
+      - QualifiedBodyUse
+      - QualifiedScopeUse
       - Recursive
+      - Section
+      - SectionApp
       - Shadow
       - TopLevel
       - Uncalled
+      - UseSiteArg
       - Where
       - Where2

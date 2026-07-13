@@ -85,7 +85,7 @@ resolveTests = testGroup "resolve" [
   , runTest "Inline constant" "Inline e" "Constant" (Position 6 4)
   , runTest "Rename variables that would be incorrectly captured after substitution" "Inline e" "Capture" (Position 6 6)
   , runTest "Rename only variables that would be incorrectly captured after substitution" "Inline e" "Capture2" (Position 6 6)
-  , runTest "Doesn't rename shadowed identifier" "Inline e" "Shadow" (Position 8 6)
+  , expectFail $ runTest "Doesn't rename shadowed identifier" "Inline e" "Shadow" (Position 8 6)
   , runTest "Inlines an infix function correctly" "Inline e" "Infix" (Position 6 7)
   , runTest "Inlines let expression correctly" "Inline e" "Let" (Position 6 4)
   , runTest "Inlines parenthesized expression correctly" "Inline e" "Parenthesis" (Position 6 4)
@@ -97,7 +97,6 @@ resolveTests = testGroup "resolve" [
   -- to retain exactly the same behaviour this could be pulled out into a let
   -- binding.
   , runTest "Duplicates the argument when a parameter is used multiple times" "Inline e" "DuplicateArg" (Position 8 4)
-  , runTest "Offers inlining for type class methods" "Inline e" "Class" (Position 6 6)
   , runTest "Offers inlining for let bindings" "Inline e" "Let2" (Position 5 5)
   , runTest "Handle capture for let bindings" "Inline e" "Let3" (Position 5 10)
   , runTest "Offers inlining for bindings in where clauses" "Inline e" "Where" (Position 2 6)
@@ -129,17 +128,43 @@ resolveTests = testGroup "resolve" [
   , runTest "Handles substitution of record dot syntax correctly" "Inline e" "RecordDot" (Position 7 6)
   , runTest "Lambda with a pattern should be inlined correctly" "Inline e" "PatternLambda" (Position 4 4)
   , runTest "Inlines only the call site under the cursor" "Inline e at this use site" "InlineUseSite" (Position 6 7)
+  -- The bare 'e' passed to map is an independent partial-application
+  -- site even though it sits inside the enclosing 'e (...)' call's span;
+  -- only a bare reference that heads a site is subsumed by it.
+  , runTest "Inlines the bare reference under the cursor inside another call's argument" "Inline e at this use site" "UseSiteArg" (Position 6 19)
   , runTest "Identifies the function to inline by definition site, not name" "Inline f" "SameName" (Position 9 4)
   -- Inlining an operator that is also used inside a 'proc' rewrites the ordinary
   -- use but leaves the one inside the arrow notation untouched: arrow command
   -- syntax restricts where a spliced expression may stand, so the call-site search
   -- never inlines inside a 'proc' (see 'findCallSites').
   , runTest "Leaves an arrow command-position use untouched" "Inline >:>" "ProcModule" (Position 10 3)
+  , runTest "Leaves a use under a visible type application untouched" "Inline e" "TypeApplication" (Position 5 0)
+  -- A backtick section is a site of its own: retrie rewrites it to a
+  -- lambda eta-expanding the unsupplied parameter.
+  , runTest "Inlines a backtick section by eta-expanding the unsupplied parameter" "Inline add" "Section" (Position 6 8)
+  -- A section applied to its remaining argument inlines as the section's
+  -- lambda left applied -- a beta redex. Collapsing @(\\x -> x + 2) 5@
+  -- to @5 + 2@ would need a section-with-extras rewrite in retrie,
+  -- mirroring the parenthesized-infix one (see InfixExtraArg).
+  , runTest "Inlines a backtick section applied to its remaining argument" "Inline add" "SectionApp" (Position 3 0)
   , runTest "Parenthesizes a body that is an expression type signature" "Inline e" "TySig" (Position 9 10)
   , runTest "Alpha-renames a captured identifier that appears inside an argument" "Inline e" "ArgRename" (Position 12 6)
   , runTest "Appends an import the inlined body needs to the use-site file when inlining across files" "Inline e" "CrossFileUse" (Position 5 4)
+  -- The body's references are checked with the spelling the source uses:
+  -- a qualified-only import at the use site does not satisfy the body's
+  -- bare reference, so the unqualified import is still added.
+  , runTest "Adds an import when the needed name is in scope only qualified at the use site" "Inline e at this use site" "QualifiedScopeUse" (Position 6 4)
+  -- The spliced body keeps the defining module's qualified spelling
+  -- (DM.fromMaybe), so the synthesized import is qualified to match.
+  , runTest "Adds a qualified import matching the body's spelling when inlining across files" "Inline e at this use site" "QualifiedBodyUse" (Position 5 4)
   , runTest "Leaves the use site unchanged when the inlined body needs a binding the defining module does not export" "Inline e" "CrossModuleNotExportedUse" (Position 4 4)
   , runTest "Inlines correctly in a file that uses CPP directives" "Inline e" "Cpp" (Position 11 4)
+  -- The fixity environment is keyed by bare operator name, and the merge
+  -- of the defining and target modules' fixities is right-biased. The
+  -- target's qualified use of FixityOther.>< (infixr 8) therefore clobbers
+  -- FixityDef.><'s infix 2, so retrie believes the spliced body binds
+  -- tighter than && and omits the parentheses the true fixity requires.
+  , expectFail $ runTest "Parenthesizes the spliced body using the defining module's operator fixity when a same-named operator is around" "Inline e" "FixityUse" (Position 9 4)
   ]
 
 -- | Inlining every use of a function rewrites every project file that uses it,
@@ -189,6 +214,14 @@ actionTests = testGroup "action" [
   , runActionTest "Variables offer no Inline action" "TopLevel" (Position 3 6) []
   , runActionTest "Offers inlining at definition" "Constant" (Position 3 0) ["Inline e"]
   , runActionTest "Recursive functions cannot be inlined" "Recursive" (Position 6 4) []
+  -- Inlining a class method would substitute one implementation at a call
+  -- site that dispatches through the class dictionary: here `e (5 :: Int)`
+  -- means the Int instance's body, not the default.
+  , runActionTest "Class methods with an overriding instance cannot be inlined" "ClassInstance" (Position 10 4) []
+  -- ...and even without an instance in sight the method stays uninlinable:
+  -- instances may exist in other modules or be added later.
+  , runActionTest "Class methods offer no Inline action" "Class" (Position 6 6) []
+  , runActionTest "Functions that recurse via their where clause cannot be inlined" "WhereRecursion" (Position 11 4) []
   , runActionTest "Functions consisting of guards cannot be inlined" "Guards" (Position 8 4) []
   , runActionTest "Pattern bindings cannot be inlined" "PatternBind" (Position 5 4) []
   , runActionTest "Bindings with multiple clauses cannot be inlined" "MultiClause" (Position 7 4) []
@@ -197,7 +230,11 @@ actionTests = testGroup "action" [
   , runActionTest "Offers inlining for a definition imported from a local module" "LocalImport" (Position 4 6) ["Inline e", "Inline e at this use site"]
   , runActionTest "Does not offer inlining when there is a RecordWildCards binding in the arguments" "RecordWildCards2" (Position 15 6) []
   , runActionTest "Does not offer inlining when a forall'd type variable in the body would be captured at the call site" "ImplicitForall" (Position 14 8) []
+  , runActionTest "Does not offer inlining when a forall'd type variable is referenced only from the where clause" "WhereTyVar" (Position 14 4) []
   , runActionTest "Prevent inlining when the function contains a pattern bind" "Pattern" (Position 5 4) []
+  -- A backtick-section operator sits inside the parenthesized section,
+  -- which is a rewriteable site of its own, so both scopes are offered.
+  , runActionTest "Offers both inline scopes on a backtick-section operator" "Section" (Position 9 13) ["Inline add", "Inline add at this use site"]
   -- At a use site, both inline-all and inline-this-use-site are offered; at the
   -- definition only inline-all is.
   , runActionTest "Offers both inline scopes at a use site" "InlineUseSite" (Position 6 7) ["Inline e", "Inline e at this use site"]

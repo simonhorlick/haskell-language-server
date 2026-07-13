@@ -681,6 +681,7 @@ library hls-inline-function-plugin
     , retrie
     , syb
     , text
+    , text-rope
     , transformers
 
 

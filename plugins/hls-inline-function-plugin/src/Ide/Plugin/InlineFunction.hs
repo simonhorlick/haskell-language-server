@@ -13,11 +13,14 @@ module Ide.Plugin.InlineFunction (
 import           Control.Lens                      ((&), (?~), (^.))
 import           Control.Monad                     (forM, guard)
 import           Control.Monad.IO.Class            (liftIO)
+import           Control.Monad.Trans.Class         (lift)
 import           Control.Monad.Trans.Except        (throwE)
 import           Control.Monad.Trans.Maybe         (MaybeT (..), runMaybeT)
+import qualified Data.Text.Utf16.Rope.Mixed        as Rope
 import           Development.IDE                   (Action, IdeState,
                                                     filePathToUri', runAction,
                                                     toNormalizedFilePath', use)
+import           Development.IDE.Core.FileStore    (getFileContents)
 import           Development.IDE.Core.RuleTypes    (GetHieAst (..),
                                                     GhcSessionDeps (..),
                                                     TcModuleResult (..),
@@ -136,6 +139,10 @@ findCandidate path pos = runMaybeT $ do
     if defPath == path
       then pure check
       else MaybeT $ use TypeCheck defPath
+  -- class-method calls dispatch through the instance dictionary, so no
+  -- single implementation (default or instance) can be spliced into a
+  -- call site without changing the program's meaning
+  guard $ not (isClassMethod defCheck name)
   -- find the binding in the defining module's renamed source (i.e. once all
   -- 'Name's have been uniquely resolved) and check it can be inlined
   definition <- MaybeT $ pure $ findDefinition (tmrRenamed defCheck) name
@@ -152,10 +159,20 @@ findCandidate path pos = runMaybeT $ do
     , site
     )
 
+-- | True when @name@ is a type class method, per the defining module's
+-- type environment. Covers both default methods and instance methods: a
+-- use of either resolves to the class-op 'Name'.
+isClassMethod :: TcModuleResult -> Name -> Bool
+isClassMethod check name =
+  case lookupNameEnv (tcg_type_env (tmrTypechecked check)) name of
+    Just (AnId ident) -> isClassOpId ident
+    _                 -> False
+
 -- | For the given cursor position, determine if there is a function here that
 -- could be inlined. If so, provide the details to display to the user. At a
--- use site the single-site variant is offered alongside inline-all; at the
--- definition only inline-all makes sense.
+-- use site the single-site variant is offered alongside inline-all, provided
+-- the use is a rewriteable call site (a reference in operator position, say,
+-- is a use but not a site); at the definition only inline-all makes sense.
 codeAction :: PluginMethodHandler IdeState Method_TextDocumentCodeAction
 codeAction state _plId CodeActionParams{_textDocument, _range} = do
   let uri = _textDocument ^. L.uri
@@ -168,7 +185,10 @@ codeAction state _plId CodeActionParams{_textDocument, _range} = do
       Nothing -> []
       Just (cand, _, site) ->
         [InR (mkAction cand pos InlineAll)]
-          <> [InR (mkAction cand pos InlineSingle) | site == AtUseSite]
+          <> [ InR (mkAction cand pos InlineSingle)
+             | site == AtUseSite
+             , not (null (callSiteAt pos cand.sites))
+             ]
 
 -- | Creates a 'CodeAction' for the client to display.
 mkAction :: InlineCandidate -> Position -> InlineScope -> CodeAction
@@ -203,7 +223,7 @@ resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
     -- the rewrite template is constructed from the defining module
     def <- rewriteInputs defPath
     pure (cand, defPath, def)
-  (cand, defPath, (defSource, defCheck, defEnv)) <-
+  (cand, defPath, (defSource, defCheck, defEnv, _)) <-
     handleMaybe
       (PluginInternalError "inline candidate no longer resolves")
       maybeResult
@@ -225,7 +245,7 @@ resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
       -- files the session cannot load are skipped rather than failing
       -- the whole edit
       Nothing -> pure Nothing
-      Just (source, check, env) -> do
+      Just (source, check, env, contents) -> do
         let allSites =
               findAllCallSites (tmrRenamed check) cand.name (length cand.definition.params)
             sites = case scope of
@@ -257,6 +277,7 @@ resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
                        (tmrTypechecked defCheck)
                        (tmrTypechecked check)
                        source
+                       contents
                        cand.definition.bodyRefs of
                   -- a binding the spliced body needs cannot be imported
                   -- here; inlining would not compile, so leave this file
@@ -300,12 +321,16 @@ referencingFiles state name = do
 -- (mirrors hls-explicit-fixity-plugin).
 rewriteInputs
   :: NormalizedFilePath
-  -> MaybeT Action (ParsedSource, TcModuleResult, HscEnv)
+  -> MaybeT Action (ParsedSource, TcModuleResult, HscEnv, T.Text)
 rewriteInputs path = do
   source  <- MaybeT $ use GetAnnotatedParsedSource path
   check   <- MaybeT $ use TypeCheck path
   session <- MaybeT $ use GhcSessionDeps path
-  pure (source, check, hscEnv session)
+  -- the text is only consulted for the import insertion point's
+  -- pragma-scanning fallback; a file not held in memory falls back to
+  -- empty, which degrades that fallback to the top of the file
+  contents <- lift $ maybe "" Rope.toText <$> getFileContents path
+  pure (source, check, hscEnv session, contents)
 
 -- | Construct a 'WorkspaceEdit' from the per-file 'TextEdit's.
 mkWorkspaceEdit :: [(Uri, [TextEdit])] -> WorkspaceEdit

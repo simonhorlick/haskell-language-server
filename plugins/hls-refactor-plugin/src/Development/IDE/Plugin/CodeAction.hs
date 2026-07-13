@@ -11,6 +11,8 @@ module Development.IDE.Plugin.CodeAction
     bindingsPluginDescriptor,
     fillHolePluginDescriptor,
     extendImportPluginDescriptor,
+    -- * For reuse by other plugins
+    newImportInsertRange,
     -- * For testing
     matchRegExMultipleImports,
     extractNotInScopeName,

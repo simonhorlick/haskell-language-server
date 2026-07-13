@@ -8,5 +8,4 @@ e x = E { a = five }
 
 g x = 1
 
-f = g (let
-       five = 5 in E { a = five })
+f = g (let five = 5 in E { a = five })

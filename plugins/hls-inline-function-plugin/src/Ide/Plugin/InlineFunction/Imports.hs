@@ -1,62 +1,108 @@
 -- | Compute the imports a target module needs so that a function body
 -- spliced into it by inlining still resolves.
 --
--- The body of the inlined function may reference bindings that are in
--- scope in its defining module but not at the call site -- @fromMaybe@
--- in a module that never imports "Data.Maybe", say. For each such name
--- we synthesize a minimal explicit import. Names nobody can import
--- (the defining module keeps them private) make the splice impossible,
--- and the caller is expected to leave the target file unchanged.
+-- The spliced text keeps the defining module's spellings, so each of the
+-- body's external references is checked as spelled: a bare reference
+-- needs its name in scope unqualified, a qualified reference needs an
+-- import under that qualifier. For spellings that resolve to nothing we
+-- synthesize an import providing them. Names nobody can import (the
+-- defining module keeps them private) and spellings that already mean
+-- something else at the target make the splice impossible, and the
+-- caller is expected to leave the target file unchanged.
 module Ide.Plugin.InlineFunction.Imports
   ( importEdits
   ) where
 
-import           Data.List                   (intercalate, sort)
-import qualified Data.Map                    as M
-import           Data.Maybe                  (isJust, isNothing)
-import qualified Data.Set                    as S
-import qualified Data.Text                   as T
+import           Data.List                         (intercalate, sort)
+import qualified Data.Map                          as M
+import           Data.Maybe                        (isJust, isNothing)
+import qualified Data.Set                          as S
+import qualified Data.Text                         as T
 import           Development.IDE.GHC.Compat
-import           Language.LSP.Protocol.Types (Position (..), Range (..),
-                                              TextEdit (..))
+import           Development.IDE.Plugin.CodeAction (newImportInsertRange)
+import           Language.LSP.Protocol.Types       (TextEdit (..))
 
 -- | The import edits the target module needs so the spliced body's
--- references stay in scope, or 'Nothing' when some needed name cannot
--- be imported (its defining module does not export it), in which case
+-- references stay in scope, or 'Nothing' when some needed spelling
+-- cannot be provided (its defining module does not export the name, or
+-- the spelling already means something else here), in which case
 -- inlining into this module would not compile.
 importEdits
   :: TcGblEnv     -- ^ The defining module: provenance of the body's references.
   -> TcGblEnv     -- ^ The target module: what is already in scope there.
   -> ParsedSource -- ^ The target module's source, for the insertion point.
-  -> [Name]       -- ^ External names the spliced body references.
+  -> T.Text       -- ^ The target module's text, for the insertion point.
+  -> [(RdrName, Name)]
+  -- ^ External names the spliced body references, with their spellings.
   -> Maybe [TextEdit]
-importEdits defTc targetTc targetSource needs
+importEdits defTc targetTc targetSource targetContents needs
+  | any conflicting missing = Nothing
   | any isNothing sources = Nothing
   | null missing = Just []
-  | otherwise = Just [TextEdit (Range insertAt insertAt) importText]
+  | otherwise = do
+      (range, _indent) <- newImportInsertRange targetSource targetContents
+      pure [TextEdit range importText]
   where
+    targetEnv = tcg_rdr_env targetTc
+
     -- Names the renamer inserted itself -- 'getField' behind
     -- OverloadedRecordDot, literal witnesses like 'fromInteger' -- have no
     -- 'GlobalRdrElt' in the defining module. The spliced source text never
     -- mentions them, so they need no import.
     userWritten =
-      filter (isJust . lookupGRE_Name (tcg_rdr_env defTc)) $
-        S.toList (S.fromList needs)
-    -- names not already in scope (under any spelling) in the target
-    missing =
-      filter (isNothing . lookupGRE_Name (tcg_rdr_env targetTc)) userWritten
-    sources = map (importModuleFor defTc) missing
-    byModule =
+      S.toList . S.fromList $
+        filter (isJust . lookupGRE_Name (tcg_rdr_env defTc) . snd) needs
+
+    -- spellings that do not already mean the right thing in the target
+    missing = filter (not . satisfied) userWritten
+    satisfied (rdr, n) =
+      maybe False (`providesSpelling` rdr) (lookupGRE_Name targetEnv n)
+
+    -- the spelling names something /else/ at the target: an added import
+    -- could only make it ambiguous, never make it mean the body's
+    -- reference, so inlining here is refused
+    conflicting (rdr, n) =
+      any
+        (\gre -> gre_name gre /= n && gre `providesSpelling` rdr)
+        (M.findWithDefault [] (rdrNameOcc rdr) targetGREsByOcc)
+    targetGREsByOcc =
+      M.fromListWith (<>)
+        [ (occ, [gre])
+        | gre <- globalRdrEnvElts targetEnv
+        , let occ = nameOccName (gre_name gre)
+        , occ `S.member` neededOccs
+        ]
+    neededOccs = S.fromList (map (rdrNameOcc . fst) userWritten)
+
+    -- does this environment entry let the given spelling resolve to it?
+    providesSpelling gre = \case
+      Unqual _ -> unQualOK gre
+      Qual q _ -> q `elem` [is_as (is_decl spec) | spec <- gre_imp gre]
+      -- Orig/Exact spellings cannot come from user-written source
+      _        -> True
+
+    sources = map (importModuleFor defTc . snd) missing
+    unqualByModule =
       M.fromListWith (<>)
         [ (m, [nameOccName n])
-        | (Just m, n) <- zip sources missing
+        | ((Unqual _, n), Just m) <- zip missing sources
+        ]
+    qualImports =
+      S.fromList
+        [ (m, q)
+        | ((Qual q _, _), Just m) <- zip missing sources
         ]
     importText =
-      T.pack $ unlines
+      T.pack $ unlines $
         [ "import " <> moduleNameString m <> " (" <> renderOccs occs <> ")"
-        | (m, occs) <- M.toAscList byModule
+        | (m, occs) <- M.toAscList unqualByModule
+        ] <>
+        [ "import qualified " <> moduleNameString m <> alias
+        | (m, q) <- S.toAscList qualImports
+        , let alias
+                | q == m    = ""
+                | otherwise = " as " <> moduleNameString q
         ]
-    insertAt = insertPosition targetSource
 
 -- | The module to import @name@ from, or 'Nothing' if it cannot be
 -- imported. A name the defining module bound locally is importable from
@@ -86,17 +132,3 @@ renderOccs = intercalate ", " . sort . map renderOcc
     renderOcc occ
       | isSymOcc occ = "(" <> occNameString occ <> ")"
       | otherwise    = occNameString occ
-
--- | Where to insert new imports: the line after the last existing import,
--- or failing that the line after the module header, or the top of the file.
-insertPosition :: ParsedSource -> Position
-insertPosition (L _ m) =
-  case reverse (hsmodImports m) of
-    lastImport : _ | Just line <- endLine (getLocA lastImport) -> Position line 0
-    _ -> case hsmodName m of
-      Just lname | Just line <- endLine (getLocA lname) -> Position line 0
-      _                                                 -> Position 0 0
-  where
-    -- 1-based end line of the span is the 0-based line after it
-    endLine (RealSrcSpan sp _) = Just (fromIntegral (srcSpanEndLine sp))
-    endLine _                  = Nothing
