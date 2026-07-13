@@ -605,6 +605,33 @@ soakRegressionTests = testGroup "soak regressions" [
     -- any column; the golden variant pins that layout.
   , serverSyncTest "A multi-line let body keeps its layout when spliced into an equation" "MultiLineLetBody" (Position 15 10) "Inline standardize"
   , runTest "A hanging let body re-lays canonically when spliced (layout)" "Inline standardize" "MultiLineLetBody" (Position 15 10)
+    -- Found on ghcide's mergeEnvs (Compile.hs, 'Inline hsc_env''): the plugin
+    -- diffs the exact-printed parsed module to build its edits, but that
+    -- print is the *preprocessed* text -- CPP directives and dead '#if'
+    -- branches are blank lines there. A multi-line splice near a CPP region
+    -- produces diff hunks the algorithm aligns with those blanks, and applied
+    -- to the real document they interleave body fragments with the dead
+    -- branch (silent corruption, or "parse error"). Edits are vetted
+    -- against the real document text and a target whose hunks touch a
+    -- preprocessor-rewritten line is refused; golden with an unchanged
+    -- expectation, since refusing the file is the only safe outcome.
+  , runTest "A splice whose edits touch a CPP region leaves the file unchanged" "Inline e" "CppRegionUse" (Position 16 4)
+    -- A hole the vetting cannot see: rename information is built from the
+    -- renamed source, which covers only the *active* CPP branch. A
+    -- capture-avoiding rename patches the binder and its active-branch
+    -- occurrences -- all on clean lines, so the vetting passes -- while
+    -- occurrences of the same binder inside a non-active branch are
+    -- invisible and keep the old name: under the other CPP configuration
+    -- they silently rebind to whatever the old name now resolves to. The
+    -- active configuration still typechecks, so only a golden can see it;
+    -- expected is the unchanged file, since without rename information for
+    -- every branch the only safe outcome is refusing the rewrite.
+    -- (expectFail until fixed.)
+  , expectFail $ runTest "A capture rename with occurrences in a non-active CPP branch leaves the file unchanged" "Inline e at this use site" "CppRenameUse" (Position 22 5)
+    -- ...whereas a multi-line splice whose edits stay on clean lines (the
+    -- CPP block is elsewhere in the file) applies through the whole-module
+    -- reprint and keeps its layout.
+  , runTest "A multi-line splice in a CPP file keeps its indentation" "Inline e at this use site" "CppIndentUse" (Position 22 10)
     -- Found on hls-cabal-plugin's cabalPositionToLSPPosition (Position): the
     -- spliced body needs a data constructor not in scope at the target, so
     -- the plugin imports it through its parent type ('import M (Name(Name))').

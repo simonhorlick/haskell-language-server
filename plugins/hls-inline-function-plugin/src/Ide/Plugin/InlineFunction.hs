@@ -65,7 +65,9 @@ import           Ide.Plugin.InlineFunction.Resolve (BindingDef (..),
                                                     findDefinition,
                                                     nameUnderCursor,
                                                     selectClauseSites)
-import           Ide.Plugin.InlineFunction.Rewrite (buildEdits, fixityEnvFor)
+import           Ide.Plugin.InlineFunction.Rewrite (buildEdits,
+                                                    editsTouchMangledLines,
+                                                    fixityEnvFor)
 import           Ide.Plugin.InlineFunction.Util    (toRealSrcSpan)
 import qualified Ide.Plugin.Resolve                as Resolve
 import qualified Language.LSP.Protocol.Lens        as L
@@ -377,8 +379,18 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities ta
               logWith recorder Logger.Warning (LogBuildEditsFailed err)
               pure $ TargetFailed ("the rewrite failed: " <> T.pack err)
             -- no call site was rewritten, so don't add imports either
-            Right [] -> pure TargetSkipped
-            Right edits ->
+            Right (_, []) -> pure TargetSkipped
+            -- the edits' line ranges refer to the exact-printed
+            -- (preprocessed) module; one that touches a line the
+            -- preprocessor rewrote -- a CPP directive or a dead '#if'
+            -- branch, blank in the print -- would splice fragments into
+            -- that region of the real document, so the file must be
+            -- left unchanged
+            Right (printed, edits)
+              | editsTouchMangledLines printed contents edits ->
+                  pure $ TargetNotRewritable
+                    "the rewrite would edit lines the preprocessor changed"
+              | otherwise ->
               case importEdits
                      (tmrTypechecked defCheck)
                      (tmrTypechecked check)

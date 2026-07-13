@@ -14,6 +14,7 @@
 -- replacement fragments.
 module Ide.Plugin.InlineFunction.Rewrite
   ( buildEdits
+  , editsTouchMangledLines
   , fixityEnvFor
   ) where
 
@@ -35,7 +36,9 @@ import           Ide.Plugin.InlineFunction.Resolve     (BindingDef (..),
                                                         SiteInline (..))
 import           Ide.Plugin.InlineFunction.Util        (hsVarName)
 import           Ide.PluginUtils                       (makeDiffTextEdit)
-import           Language.LSP.Protocol.Types           (TextEdit)
+import           Language.LSP.Protocol.Types           (Position (..),
+                                                        Range (..),
+                                                        TextEdit (..))
 import           Retrie                                (Annotated,
                                                         Context (ctxtMatchSpan),
                                                         MatchResult (NoMatch),
@@ -68,7 +71,11 @@ buildEdits
   -> (ParsedSource, RenamedSource)
   -- ^ The module whose call sites are rewritten.
   -> InlineCandidate
-  -> IO (Either String [TextEdit])
+  -> IO (Either String (T.Text, [TextEdit]))
+  -- ^ On success, the exact-printed module the edits' line ranges refer
+  -- to, alongside the edits. The print is the /preprocessed/ source, so
+  -- the caller must vet the edits against the real document text with
+  -- 'editsTouchMangledLines' before applying them.
 buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
   let defAnnotated    = unsafeMkA (makeDeltaAst defSource) 0
       targetAnnotated = unsafeMkA (makeDeltaAst targetSource) 0
@@ -115,7 +122,7 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
                  (setRewriteTransformer (restrictToSites dispatchSpans))
                  dispatchUniverse
     if null rewrites
-      then pure (rewrites, [])
+      then pure (rewrites, (T.empty, []))
       else do
         (_, rewritten, _change) <-
           runRetrie
@@ -130,11 +137,38 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
         -- 'Retrie.Replace.renameOccurrences'), so the reprint is complete.
         let before = T.pack (printA targetAnnotated)
             after  = T.pack (printCPP [] rewritten)
-        pure (rewrites, makeDiffTextEdit before after)
+        pure (rewrites, (before, makeDiffTextEdit before after))
   pure $ case result of
-    Left err         -> Left ("retrie failed: " <> show err)
-    Right ([], _)    -> Left "no rewrites produced for the function"
-    Right (_, edits) -> Right edits
+    Left err       -> Left ("retrie failed: " <> show err)
+    Right ([], _)  -> Left "no rewrites produced for the function"
+    Right (_, res) -> Right res
+
+-- | True when any edit's line range touches a line where the
+-- exact-printed module and the document text disagree. The parsed
+-- module ghcide hands us is the /preprocessed/ source: CPP directives
+-- and inactive @#if@ branches are blank lines there, and the
+-- diff-derived edits are positioned in that text. An edit confined to
+-- lines the two texts share applies to the document verbatim, but one
+-- that touches a preprocessor-rewritten line would splice fragments
+-- into CPP directives or dead branches, so the file must be left
+-- unchanged. Insertions (empty ranges) are vetted against both lines
+-- adjacent to the insertion point.
+editsTouchMangledLines :: T.Text -> T.Text -> [TextEdit] -> Bool
+editsTouchMangledLines printed document = any touches
+  where
+    printedLines  = M.fromList (zip [0 :: Int ..] (T.lines printed))
+    documentLines = M.fromList (zip [0 :: Int ..] (T.lines document))
+    differsAt i = M.lookup i printedLines /= M.lookup i documentLines
+    touches (TextEdit (Range (Position sl _) (Position el ec)) _) =
+      any differsAt [max 0 (start - 1) .. end]
+      where
+        start = fromIntegral sl
+        -- a line-diff range ends at column 0 of the line after the last
+        -- one it covers; an insertion's empty range checks its
+        -- neighbours instead
+        end
+          | el > sl, ec == 0 = fromIntegral el - 1
+          | otherwise        = fromIntegral el
 
 -- | Refuse any match that does not occur at one of the candidate's call
 -- sites. Site policy thereby lives inside the engine, next to match
