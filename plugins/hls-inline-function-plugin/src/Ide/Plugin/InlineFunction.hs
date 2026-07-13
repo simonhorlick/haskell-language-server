@@ -11,10 +11,11 @@ module Ide.Plugin.InlineFunction (
   ) where
 
 import           Control.Lens                      ((&), (?~), (^.))
-import           Control.Monad                     (forM, guard)
+import           Control.Monad                     (forM, guard, unless)
 import           Control.Monad.IO.Class            (liftIO)
 import           Control.Monad.Trans.Class         (lift)
-import           Control.Monad.Trans.Except        (throwE)
+import           Control.Monad.Trans.Except        (ExceptT (..), runExceptT,
+                                                    throwE)
 import           Control.Monad.Trans.Maybe         (MaybeT (..), runMaybeT)
 import qualified Data.Text.Utf16.Rope.Mixed        as Rope
 import           Development.IDE                   (Action, IdeState,
@@ -43,10 +44,10 @@ import           Language.LSP.Protocol.Message
 import           Language.LSP.Protocol.Types       as JL
 
 import           Data.Aeson                        (FromJSON, ToJSON (toJSON))
+import           Data.List                         (sortOn)
 import           GHC.Generics                      (Generic)
 
 import qualified Data.Map                          as M
-import           Data.Maybe                        (catMaybes)
 import qualified Data.Set                          as S
 import qualified Data.Text                         as T
 import           Development.IDE.GHC.Compat
@@ -66,6 +67,9 @@ import           Ide.Plugin.InlineFunction.Rewrite (buildEdits, fixityEnvFor)
 import           Ide.Plugin.InlineFunction.Util    (toRealSrcSpan)
 import qualified Ide.Plugin.Resolve                as Resolve
 import qualified Language.LSP.Protocol.Lens        as L
+import           Language.LSP.Server               (ProgressCancellable (Cancellable))
+import           Retrie.Fixity                     (FixityEnv)
+import           System.FilePath                   (takeFileName)
 
 data Log
   = LogExactPrint E.Log
@@ -213,85 +217,156 @@ mkAction cand pos scope =
 -- the UI. The client will pass back the 'InlineResolveData' we provided earlier
 -- so we can figure out exactly which function should be inlined and compute
 -- the appropriate diff to apply.
+--
+-- The whole computation runs under a cancellable progress session: inlining
+-- every use typechecks each file that references the function, which can
+-- take a while on a large project. A target file that cannot be rewritten
+-- does not abort the rest: the surviving edits are applied and the files
+-- left out are reported in a warning notification. Only an error on a
+-- single-site inline -- whose one target is the whole action -- fails the
+-- resolve itself.
 resolveProvider
   :: Recorder (WithPriority Log)
   -> ResolveFunction IdeState InlineResolveData Method_CodeActionResolve
 resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
   path <- getNormalizedFilePathE uri
-  maybeResult <- liftIO $ runAction "InlineFunction.resolve" state $ runMaybeT $ do
-    (cand, defPath, _) <- MaybeT $ findCandidate path pos
-    -- the rewrite template is constructed from the defining module
-    def <- rewriteInputs defPath
-    pure (cand, defPath, def)
-  (cand, defPath, (defSource, defCheck, defEnv, _)) <-
-    handleMaybe
-      (PluginInternalError "inline candidate no longer resolves")
-      maybeResult
-  -- Inlining every use rewrites all project files that reference the
-  -- function: the requesting file, the defining file, and whatever other
-  -- files the hiedb reference index knows about. Inlining a single use
-  -- only ever touches the requesting file.
-  targets <- case scope of
-    InlineSingle -> pure [path]
-    InlineAll -> do
-      refFiles <- liftIO $ referencingFiles state cand.name
-      pure $ S.toList (S.fromList (path : defPath : refFiles))
-  defFixities <- liftIO $
-    fixityEnvFor defEnv (tmrTypechecked defCheck) (tmrRenamed defCheck)
-  fileEdits <- forM targets $ \target -> do
-    maybeInputs <- liftIO $ runAction "InlineFunction.resolve" state $
-      runMaybeT $ rewriteInputs target
-    case maybeInputs of
-      -- files the session cannot load are skipped rather than failing
-      -- the whole edit
-      Nothing -> pure Nothing
-      Just (source, check, env, contents) -> do
-        let allSites =
-              findAllCallSites (tmrRenamed check) cand.name (length cand.definition.params)
-            sites = case scope of
-              InlineAll    -> allSites
-              InlineSingle -> callSiteAt pos allSites
-        if null sites
-          then pure Nothing
-          else do
-            -- operators spliced in with the body come from the defining
-            -- module, the ones around the call site from the target
-            fixities <- liftIO $
-              (defFixities <>)
-                <$> fixityEnvFor env (tmrTypechecked check) (tmrRenamed check)
-            editsResult <- liftIO $
-              buildEdits
-                fixities
-                (defSource, tmrRenamed defCheck)
-                (source, tmrRenamed check)
-                cand{sites = sites}
-            case editsResult of
-              Left err -> do
-                -- failed with error
-                logWith recorder Logger.Warning (LogBuildEditsFailed err)
-                throwE (PluginInternalError ("buildEdits: " <> T.pack err))
-              -- no call site was rewritten, so don't add imports either
-              Right [] -> pure Nothing
-              Right edits ->
-                case importEdits
-                       (tmrTypechecked defCheck)
-                       (tmrTypechecked check)
-                       source
-                       contents
-                       cand.definition.bodyRefs of
-                  -- a binding the spliced body needs cannot be imported
-                  -- here; inlining would not compile, so leave this file
-                  -- unchanged
-                  Nothing -> pure Nothing
-                  Just importTextEdits ->
-                    pure $
-                      Just
-                        ( fromNormalizedUri (filePathToUri' target)
-                        , edits <> importTextEdits
-                        )
-  -- the resolve wrapper requires an edit on every resolved action, so
-  -- "nothing to change" is an empty edit rather than a missing one
-  pure $ ca & L.edit ?~ mkWorkspaceEdit (catMaybes fileEdits)
+  ExceptT $ pluginWithIndefiniteProgress (ca ^. L.title) Nothing Cancellable $
+    \updateProgress -> runExceptT $ do
+      maybeResult <- liftIO $ runAction "InlineFunction.resolve" state $ runMaybeT $ do
+        (cand, defPath, _) <- MaybeT $ findCandidate path pos
+        -- the rewrite template is constructed from the defining module
+        def <- rewriteInputs defPath
+        pure (cand, defPath, def)
+      (cand, defPath, (defSource, defCheck, defEnv, _)) <-
+        handleMaybe
+          (PluginInternalError "inline candidate no longer resolves")
+          maybeResult
+      -- Inlining every use rewrites all project files that reference the
+      -- function: the requesting file, the defining file, and whatever other
+      -- files the hiedb reference index knows about. Inlining a single use
+      -- only ever touches the requesting file.
+      targets <- case scope of
+        InlineSingle -> pure [path]
+        InlineAll -> do
+          refFiles <- liftIO $ referencingFiles state cand.name
+          pure $ S.toList (S.fromList (path : defPath : refFiles))
+      defFixities <- liftIO $
+        fixityEnvFor defEnv (tmrTypechecked defCheck) (tmrRenamed defCheck)
+      let total = length targets
+      outcomes <- forM (zip [1 :: Int ..] targets) $ \(i, target) -> do
+        lift $ updateProgress $ T.pack $
+          show i <> "/" <> show total <> " "
+            <> takeFileName (fromNormalizedFilePath target)
+        lift $ rewriteTarget recorder state pos scope cand (defSource, defCheck)
+          defFixities target
+      let fileEdits = [edit | TargetEdited edit <- outcomes]
+          reported  = [ (t, reason)
+                      | (t, outcome) <- zip targets outcomes
+                      , reason <- case outcome of
+                          TargetNotRewritable reason -> [reason]
+                          TargetFailed reason        -> [reason]
+                          _                          -> []
+                      ]
+      -- a single-site inline has exactly one target, so an error there
+      -- fails the whole action rather than producing an empty edit
+      case (scope, [reason | TargetFailed reason <- outcomes]) of
+        (InlineSingle, reason : _) ->
+          throwE (PluginInternalError (ca ^. L.title <> ": " <> reason))
+        _ -> pure ()
+      -- per-file failures do not abort an inline-all edit: apply what
+      -- succeeded and tell the user what was left out
+      unless (null reported) $
+        lift $ pluginSendNotification SMethod_WindowShowMessage $
+          ShowMessageParams MessageType_Warning $ T.unlines $
+            (ca ^. L.title <> ": some files were not rewritten:")
+              : [ "- " <> T.pack (fromNormalizedFilePath t) <> ": " <> reason
+                | (t, reason) <- reported
+                ]
+      -- the resolve wrapper requires an edit on every resolved action, so
+      -- "nothing to change" is an empty edit rather than a missing one
+      pure $ ca & L.edit ?~ mkWorkspaceEdit fileEdits
+
+-- | What rewriting one target file produced: its edit, nothing (no call
+-- sites to rewrite), or the reason no edit was produced.
+--
+-- 'TargetNotRewritable' is an expected outcome -- the file has call sites
+-- but inlining them would not compile -- and is only ever reported as a
+-- warning; resolve must stay total for it because clients without resolve
+-- support resolve every offered action eagerly, where one failure would
+-- take down the whole code-action menu. 'TargetFailed' is an error.
+data TargetOutcome
+  = TargetEdited (Uri, [TextEdit])
+  | TargetSkipped
+  | TargetNotRewritable T.Text
+  | TargetFailed T.Text
+
+-- | Rewrite the call sites of one target file. A failure only concerns
+-- this target; the caller decides whether it aborts the whole action.
+rewriteTarget
+  :: Recorder (WithPriority Log)
+  -> IdeState
+  -> Position
+  -> InlineScope
+  -> InlineCandidate
+  -> (ParsedSource, TcModuleResult)
+  -- ^ Annotated source and typecheck result of the defining module.
+  -> FixityEnv
+  -- ^ Fixities of the operators the defining module uses.
+  -> NormalizedFilePath
+  -> HandlerM Config TargetOutcome
+rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities target = do
+  maybeInputs <- liftIO $ runAction "InlineFunction.resolve" state $
+    runMaybeT $ rewriteInputs target
+  case maybeInputs of
+    Nothing -> pure $ TargetFailed "the module could not be loaded"
+    Just (source, check, env, contents) -> do
+      let allSites =
+            findAllCallSites (tmrRenamed check) cand.name (length cand.definition.params)
+          sites = case scope of
+            InlineAll    -> allSites
+            InlineSingle -> callSiteAt pos allSites
+      if null sites
+        then pure TargetSkipped
+        else do
+          -- operators spliced in with the body come from the defining
+          -- module, the ones around the call site from the target
+          fixities <- liftIO $
+            (defFixities <>)
+              <$> fixityEnvFor env (tmrTypechecked check) (tmrRenamed check)
+          editsResult <- liftIO $
+            buildEdits
+              fixities
+              (defSource, tmrRenamed defCheck)
+              (source, tmrRenamed check)
+              cand{sites = sites}
+          case editsResult of
+            Left err -> do
+              logWith recorder Logger.Warning (LogBuildEditsFailed err)
+              pure $ TargetFailed ("the rewrite failed: " <> T.pack err)
+            -- no call site was rewritten, so don't add imports either
+            Right [] -> pure TargetSkipped
+            Right edits ->
+              case importEdits
+                     (tmrTypechecked defCheck)
+                     (tmrTypechecked check)
+                     source
+                     contents
+                     cand.definition.bodyRefs of
+                -- a binding the spliced body needs cannot be imported
+                -- here; inlining would not compile, so the file must be
+                -- left unchanged
+                Nothing ->
+                  pure $ TargetNotRewritable
+                    "the inlined body needs a binding that cannot be imported here"
+                Just importTextEdits ->
+                  -- ascending by position: some clients (lsp-test among
+                  -- them) turn the edit list into sequential didChange
+                  -- events and rely on that order, and the import edit
+                  -- would otherwise come last while sitting first
+                  pure $ TargetEdited
+                    ( fromNormalizedUri (filePathToUri' target)
+                    , sortOn (\e -> e._range._start) (edits <> importTextEdits)
+                    )
 
 -- | Files the hiedb reference index knows use @name@. The index only covers
 -- modules that have already been compiled, so it can lag behind the state of

@@ -671,12 +671,14 @@ library hls-inline-function-plugin
   build-depends:
     , aeson
     , containers
+    , filepath
     , ghc
     , ghcide                == 2.14.0.0
     , haskell-language-server:hls-refactor-plugin
     , hiedb                 ^>= 0.8.0.0
     , hls-plugin-api        == 2.14.0.0
     , lens                  ^>= 5.3.6
+    , lsp
     , lsp-types
     , retrie
     , syb

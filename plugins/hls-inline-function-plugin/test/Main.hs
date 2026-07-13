@@ -208,6 +208,60 @@ multiFileTests = testGroup "multi-file" [
             ]
   ]
 
+-- | The golden tests only inspect the client-side result of an edit; the
+-- server applies the same edit list to its own copy of the document, as a
+-- sequence of didChange events some clients derive from the array order.
+-- These tests catch a divergence between the two: after executing the
+-- action the server must still typecheck the document. CrossFileUse
+-- combines a call-site edit with an import inserted above it, Let3 puts a
+-- capture-rename and the call-site edit on one line -- both once produced
+-- an edit order that desynced the server.
+serverSyncTests :: TestTree
+serverSyncTests = testGroup "server sync" [
+    serverSyncTest "with an import edit above the call site" "CrossFileUse" (Position 5 4) "Inline e"
+  , serverSyncTest "with a capture rename beside the call site" "Let3" (Position 5 10) "Inline e"
+  ]
+
+serverSyncTest :: TestName -> FilePath -> Position -> T.Text -> TestTree
+serverSyncTest title file pos actionTitle =
+  testCase title $ runInlineSession $ do
+    doc     <- openDoc (file ++ ".hs") "haskell"
+    _       <- waitForBuildQueue
+    actions <- getCodeActions doc (L.Range pos pos)
+    action  <- pickAction actionTitle actions
+    executeCodeAction action
+    tc      <- waitForTypecheck doc
+    liftIO $ assertBool "server no longer typechecks the document" (either (const False) id tc)
+
+-- | A target file that cannot be rewritten is reported in a warning
+-- notification while the rest of the edit still applies. The session
+-- advertises resolve support so the resolve request can be sent by hand:
+-- the warning is emitted before the resolve response, so it can be read
+-- off the message stream afterwards.
+reportingTests :: TestTree
+reportingTests = testGroup "reporting" [
+    testCase "Warns about a file whose call sites cannot be rewritten" $
+      runSessionWithTestConfig def
+        { testDirLocation      = Left testDataDir
+        , testPluginDescriptor = plugin
+        , testConfigCaps       = codeActionResolveCaps
+          -- lsp-test drops window/showMessage notifications by default
+        , testConfigSession    = def { ignoreLogNotifications = False }
+        } $ const $ do
+          doc     <- openDoc "CrossModuleNotExportedUse.hs" "haskell"
+          _       <- waitForBuildQueue
+          actions <- getCodeActions doc (L.Range (Position 4 4) (Position 4 4))
+          action  <- pickAction "Inline e" actions
+          _       <- sendRequest SMethod_CodeActionResolve action
+          notif   <- skipManyTill anyMessage (message SMethod_WindowShowMessage)
+          liftIO $ do
+            notif._params._type_ @?= MessageType_Warning
+            assertBool "warning names the file" $
+              "CrossModuleNotExportedUse.hs" `T.isInfixOf` notif._params._message
+            assertBool "warning explains the failure" $
+              "cannot be imported" `T.isInfixOf` notif._params._message
+  ]
+
 actionTests :: TestTree
 actionTests = testGroup "action" [
     runActionTest "Type signature offers no Inline action" "TopLevel" (Position 2 5) []
@@ -247,6 +301,10 @@ test = testGroup "inline-function" [
     resolveTests
     -- inline-all spans every file that uses the function
   , multiFileTests
+    -- the server's copy of the document must survive the edit too
+  , serverSyncTests
+    -- files that cannot be rewritten are reported, not silently skipped
+  , reportingTests
     -- tests that verify the code action is emitted
   , actionTests
   ]
