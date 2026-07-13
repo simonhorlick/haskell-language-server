@@ -6,5 +6,5 @@ e x = addOne x
     addOne x = x + 1
 
 f x = let
-           addOne :: Int -> Int
-           addOne x = x + 1 in addOne x
+          addOne :: Int -> Int
+          addOne x = x + 1 in addOne x

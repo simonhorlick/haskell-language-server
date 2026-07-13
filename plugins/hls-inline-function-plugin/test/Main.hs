@@ -121,7 +121,7 @@ resolveTests = testGroup "resolve" [
   , runTest "Creates lambda for partially applied function" "Inline e" "Partial" (Position 6 8)
   , runTest "Creates lambda outside the let statement for partially applied function" "Inline e" "PartialLet" (Position 8 8)
   , runTest "Keeps parentheses around a right-associative body spliced onto the LHS" "Inline e" "RightAssocOp" (Position 10 4)
-  , runTest "Inlines a fully-applied call written with '$'" "Inline e" "DollarApp" (Position 8 4)
+  , runTest "Inlines a fully-applied call written with '$'" "Inline e" "DollarApp" (Position 6 4)
   , runTest "Renames a do-bound name in the body that would capture an argument" "Inline e" "DoBlockCapture" (Position 13 2)
   , runTest "Inlines mutually recursive bindings" "Inline ping" "MutualRecursion" (Position 9 9)
   , runTest "Keeps every argument of an infix call that also supplies extra arguments" "Inline e" "InfixExtraArg" (Position 9 8)
@@ -233,6 +233,95 @@ serverSyncTest title file pos actionTitle =
     tc      <- waitForTypecheck doc
     liftIO $ assertBool "server no longer typechecks the document" (either (const False) id tc)
 
+-- | Regression tests for bugs found by running the inline-function-soak
+-- executable over the HLS codebase itself. Each stays 'expectFail' until
+-- its bug is fixed; the comments name the finding that produced it.
+soakRegressionTests :: TestTree
+soakRegressionTests = testGroup "soak regressions" [
+    -- Found on exe/Wrapper.hs (launchErrorLSP's defaultArguments): the
+    -- inlined binding's body references D.e, and the occurrence name of
+    -- that qualified reference matches the binder itself. A qualified
+    -- reference keeps its qualifier in the spliced text, so it can
+    -- never be captured; the capture check now considers only bare
+    -- spellings (retrie's ContextCapture). Before the fix the spurious
+    -- rename collided with the call-site substitution, corrupting
+    -- every site ("print (D.e (Just 1))1"). Both binder kinds are
+    -- pinned: a do-let and a where binding (the where shape is ghcide
+    -- PluginUtils's mkFormattingHandlers).
+    serverSyncTest "A qualified same-named body reference does not corrupt the splice" "QualifiedSameName" (Position 7 8) "Inline e"
+  , serverSyncTest "A qualified same-named where binding does not corrupt the splice" "QualifiedSameNameWhere" (Position 6 10) "Inline e"
+    -- Found on ghcide's mkHiFileResult: the body constructs R{..} with
+    -- RecordWildCards from the function's own parameters. Substitution
+    -- replaces the parameters with the argument expressions, so the
+    -- names feeding the wildcard vanish and the construction does not
+    -- compile. The candidate is not offered.
+  , runActionTest "RecordWildCards construction from parameters offers no Inline action" "RecordWildCardsConstruct" (Position 10 4) []
+    -- ...but a wildcard fed by where binders travels with the body
+    -- (they become let bindings at the splice), so that shape stays
+    -- offerable and must still typecheck after inlining. This guards
+    -- the refusal above against over-restriction.
+  , serverSyncTest "A wildcard construction fed by where binders still inlines" "RecordWildCardsWhere" (Position 13 4) "Inline mk"
+    -- Found on ghcide's mkHomeModLocation (Compat.Core -> FindImports):
+    -- retrie printed replacement fragments after stripping the entry
+    -- whitespace from the first line only, skewing a multi-line body's
+    -- internal layout by the amount stripped. Fixed by printing with a
+    -- zeroed entry delta (retrie's Replace.replaceImpl).
+  , serverSyncTest "A multi-line let body keeps its bindings aligned when spliced into a do-bind" "MultiLineLetUse" (Position 6 13) "Inline mk"
+    -- Found on ghcide's Preprocessor.hs (cppLog): a body whose top-level
+    -- operator is '$' spliced as the left operand of a ':' section must
+    -- be parenthesized -- a section operand binds tighter than the
+    -- section's operator. Fixed by giving section operands the same
+    -- precedence context as infix-application operands (retrie's
+    -- Context.updExp).
+  , serverSyncTest "A '$' body is parenthesized when spliced into a section operand" "SectionOperand" (Position 6 9) "Inline e"
+    -- Found on ghcide's reportImportCyclesRule: a same-line where block
+    -- ("where pick 0 = 0" with siblings aligned under it) converts to a
+    -- let whose entry is one space wide, so the stripped-entry printing
+    -- bug above skewed it by one column. Same fix.
+  , serverSyncTest "A same-line where block stays aligned when converted to a let" "WhereMulti" (Position 11 4) "Inline mk"
+    -- Found on hls-plugin-api's Properties.hs (parseEither): renaming a
+    -- binder to avoid capture must rename the binder's type signature
+    -- too, or the result has a signature without a binding. The capture
+    -- here is genuine (the call site's let-bound k shadows the body's
+    -- free k); retrie's occurrence index now includes the names that
+    -- signatures mention.
+  , serverSyncTest "A capture rename also renames the binder's type signature" "SigRename" (Position 10 9) "Inline e"
+    -- Found on ghcide's defDocumentSymbol (Outline.hs): a record
+    -- update's head must stay atomic, so a body spliced there needs
+    -- parentheses. Fixed by giving the head child atomic precedence
+    -- context (retrie's Context.updExp RecordUpd).
+  , serverSyncTest "A spliced body keeps its parens under a multi-line record update" "RecordUpdateHead" (Position 9 10) "Inline e"
+    -- Found on ghcide's getClientConfigAction (Rules -> Session): the
+    -- spliced body needs a bare name that must be imported at the
+    -- target, but the target already has a same-named record field
+    -- selector in scope from another import, so the added import would
+    -- make the bare reference ambiguous. The target is refused: the
+    -- import check resolves spellings with the renamer's own lookup,
+    -- which sees field selectors.
+  , serverSyncTest "An added import does not make a body reference ambiguous" "AmbigUse" (Position 6 4) "Inline e"
+    -- Found on ghcide's mkDelta (PositionMapping -> Shake): unlike the
+    -- case above, no import is added -- the body's bare reference is
+    -- already in scope at the target through the defining module's own
+    -- open import, but a second open import provides another name with
+    -- the same spelling. The target is refused: a spelling must resolve
+    -- uniquely at the target, not merely be in scope.
+  , serverSyncTest "A body reference stays unambiguous among two open imports" "AmbigTwoUse" (Position 6 4) "Inline e"
+    -- ...whereas a same-spelling *value* in scope is already detected
+    -- and the target file is correctly left unchanged. This guards the
+    -- fix for the field-selector case above: selectors must join this
+    -- behavior, not values join the broken one.
+  , testCase "Refuses the target when a same-spelling value is in scope" $
+      runInlineSession $ do
+        doc      <- openDoc "AmbigValUse.hs" "haskell"
+        _        <- waitForBuildQueue
+        original <- documentContents doc
+        actions  <- getCodeActions doc (L.Range (Position 6 4) (Position 6 4))
+        action   <- pickAction "Inline e" actions
+        executeCodeAction action
+        contents <- documentContents doc
+        liftIO $ contents @?= original
+  ]
+
 -- | A target file that cannot be rewritten is reported in a warning
 -- notification while the rest of the edit still applies. The session
 -- advertises resolve support so the resolve request can be sent by hand:
@@ -303,6 +392,8 @@ test = testGroup "inline-function" [
   , multiFileTests
     -- the server's copy of the document must survive the edit too
   , serverSyncTests
+    -- known-broken cases found by the soak executable, expectFail until fixed
+  , soakRegressionTests
     -- files that cannot be rewritten are reported, not silently skipped
   , reportingTests
     -- tests that verify the code action is emitted

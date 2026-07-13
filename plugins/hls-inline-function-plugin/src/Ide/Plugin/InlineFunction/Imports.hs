@@ -20,6 +20,7 @@ import qualified Data.Set                          as S
 import qualified Data.Text                         as T
 import           Development.IDE.GHC.Compat
 import           Development.IDE.Plugin.CodeAction (newImportInsertRange)
+import qualified GHC.Types.Name.Reader             as Rdr
 import           Language.LSP.Protocol.Types       (TextEdit (..))
 
 -- | The import edits the target module needs so the spliced body's
@@ -36,7 +37,7 @@ importEdits
   -- ^ External names the spliced body references, with their spellings.
   -> Maybe [TextEdit]
 importEdits defTc targetTc targetSource targetContents needs
-  | any conflicting missing = Nothing
+  | any conflicting userWritten = Nothing
   | any isNothing sources = Nothing
   | null missing = Just []
   | otherwise = do
@@ -53,33 +54,25 @@ importEdits defTc targetTc targetSource targetContents needs
       S.toList . S.fromList $
         filter (isJust . lookupGRE_Name (tcg_rdr_env defTc) . snd) needs
 
+    -- Everything the spelling can refer to at the target, resolved the
+    -- way the renamer resolves a written reference: qualifiers are
+    -- honoured and record fields participate exactly when their
+    -- selectors do.
+    visible rdr =
+      Rdr.lookupGRE targetEnv (Rdr.LookupRdrName rdr (Rdr.RelevantGREsFOS Rdr.WantNormal))
+
     -- spellings that do not already mean the right thing in the target
     missing = filter (not . satisfied) userWritten
-    satisfied (rdr, n) =
-      maybe False (`providesSpelling` rdr) (lookupGRE_Name targetEnv n)
+    satisfied (rdr, n) = any ((== n) . gre_name) (visible rdr)
 
-    -- the spelling names something /else/ at the target: an added import
-    -- could only make it ambiguous, never make it mean the body's
-    -- reference, so inlining here is refused
-    conflicting (rdr, n) =
-      any
-        (\gre -> gre_name gre /= n && gre `providesSpelling` rdr)
-        (M.findWithDefault [] (rdrNameOcc rdr) targetGREsByOcc)
-    targetGREsByOcc =
-      M.fromListWith (<>)
-        [ (occ, [gre])
-        | gre <- globalRdrEnvElts targetEnv
-        , let occ = nameOccName (gre_name gre)
-        , occ `S.member` neededOccs
-        ]
-    neededOccs = S.fromList (map (rdrNameOcc . fst) userWritten)
-
-    -- does this environment entry let the given spelling resolve to it?
-    providesSpelling gre = \case
-      Unqual _ -> unQualOK gre
-      Qual q _ -> q `elem` [is_as (is_decl spec) | spec <- gre_imp gre]
-      -- Orig/Exact spellings cannot come from user-written source
-      _        -> True
+    -- the spelling also names something /else/ at the target: the
+    -- spliced reference would resolve to the wrong thing or be
+    -- ambiguous, and an added import could never repair that, so
+    -- inlining here is refused. This covers spellings the import edit
+    -- would provide as well as ones already in scope: a satisfied
+    -- spelling with a second candidate is exactly GHC's "ambiguous
+    -- occurrence" error.
+    conflicting (rdr, n) = any ((/= n) . gre_name) (visible rdr)
 
     sources = map (importModuleFor defTc . snd) missing
     unqualByModule =

@@ -7,4 +7,4 @@ three :: Int
 three = 1 + 2
 
 sums :: [Int]
-sums = map (\x -> x + 2) [5]
+sums = map (\ x -> x + 2) [5]

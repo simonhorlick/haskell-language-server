@@ -409,6 +409,31 @@ referencesTypeVar node =
     isTyVarRef (HsTyVar _ _ ident) = isTyVarName (hsVarName ident)
     isTyVarRef _                   = False
 
+-- | True when the body constructs a record with a wildcard ('R {..}')
+-- whose implicit fields pick up one of the given binders. The renamer
+-- expands the wildcard into the fields it binds, marking where the
+-- implicit ones start, and each implicit field's value is a bare
+-- variable reference -- so the check is: any implicit field whose
+-- value is one of the binders.
+wildcardUsesBinder :: Data a => [Name] -> a -> Bool
+wildcardUsesBinder binders node =
+  any usesBinder (listify isRecordCon node)
+  where
+    binderSet = S.fromList binders
+
+    isRecordCon :: HsExpr GhcRn -> Bool
+    isRecordCon RecordCon{} = True
+    isRecordCon _           = False
+
+    usesBinder (RecordCon _ _ HsRecFields{rec_flds, rec_dotdot})
+      | Just (L _ dotdot) <- rec_dotdot =
+          or
+            [ hsVarName ident `S.member` binderSet
+            | L _ HsFieldBind{hfbRHS = L _ (HsVar _ ident)} <-
+                drop (unRecFieldsDotDot dotdot) rec_flds
+            ]
+    usesBinder _ = False
+
 -- Check whether this pattern binding has an appropriate form.
 checkMatch
   :: Name
@@ -426,6 +451,12 @@ checkMatch funName funIdSp (L _ Match{m_pats, m_grhss}) = do
   -- from the function's own signature -- inlining would capture it.
   -- the where clause travels with the body, so scan it as well
   guard $ not (referencesTypeVar m_grhss)
+  -- a record constructed with a wildcard ('R {..}') picks its fields
+  -- up by name; a parameter feeding it disappears under substitution
+  -- (the argument expression replaces the name), so the construction
+  -- cannot survive inlining. Wildcard fields fed by where or let
+  -- binders are fine: those binders travel with the body.
+  guard $ not (wildcardUsesBinder params m_grhss)
   pure $
     BindingDef
       { params    = params
