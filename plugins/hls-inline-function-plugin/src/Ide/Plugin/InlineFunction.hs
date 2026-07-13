@@ -46,6 +46,7 @@ import           Language.LSP.Protocol.Types       as JL
 
 import           Data.Aeson                        (FromJSON, ToJSON (toJSON))
 import           Data.List                         (sortOn)
+import           Data.Maybe                        (fromMaybe)
 import           GHC.Generics                      (Generic)
 
 import qualified Data.Map                          as M
@@ -57,7 +58,11 @@ import           Development.IDE.Plugin.CodeAction (mkExactprintPluginDescriptor
 import           HieDb                             ((:.) (..))
 import qualified HieDb
 import           Ide.Plugin.InlineFunction.Imports (importEdits)
+import           Ide.Plugin.InlineFunction.Remove  (definitionSpans,
+                                                    deletionEdits, refsCovered,
+                                                    sitesDischarged)
 import           Ide.Plugin.InlineFunction.Resolve (BindingDef (..),
+                                                    CallSite (..),
                                                     CursorSite (..),
                                                     InlineCandidate (..),
                                                     callSiteAt, clauseRefsFor,
@@ -280,14 +285,25 @@ resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
           pure $ S.toList (S.fromList (path : defPath : refFiles))
       defFixities <- liftIO $
         fixityEnvFor defEnv (tmrTypechecked defCheck) (tmrRenamed defCheck)
+      -- Inlining every use can leave the definition itself unused, in
+      -- which case it is deleted along with the rewrite. Only a
+      -- module-private definition qualifies: an exported one can be
+      -- referenced from modules the reference index has not seen yet.
+      let removalSpans = case scope of
+            InlineAll
+              | not (cand.name `elemNameSet`
+                       availsToNameSet (tcg_exports (tmrTypechecked defCheck)))
+              -> definitionSpans (tmrRenamed defCheck) cand.name
+            _ -> Nothing
       let total = length targets
       outcomes <- forM (zip [1 :: Int ..] targets) $ \(i, target) -> do
         lift $ updateProgress $ T.pack $
           show i <> "/" <> show total <> " "
             <> takeFileName (fromNormalizedFilePath target)
         lift $ rewriteTarget recorder state pos scope cand (defSource, defCheck)
-          defFixities target
-      let fileEdits = [edit | TargetEdited edit <- outcomes]
+          defFixities (if target == defPath then removalSpans else Nothing)
+          target
+      let fileEdits = [edit | TargetEdited edit _ <- outcomes]
           reported  = [ (t, reason)
                       | (t, outcome) <- zip targets outcomes
                       , reason <- case outcome of
@@ -295,6 +311,25 @@ resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
                           TargetFailed reason        -> [reason]
                           _                          -> []
                       ]
+          -- The definition is deleted only when every target proved all
+          -- of its uses gone; the defining file's outcome carries the
+          -- vetted deletion edits.
+          targetUsesGone = \case
+            TargetEdited _ r -> r.usesGone
+            TargetSkipped r  -> r.usesGone
+            _                -> False
+          deletion = concat [r.deletion | TargetEdited _ r <- outcomes]
+          defUri   = fromNormalizedUri (filePathToUri' defPath)
+          fileEdits'
+            | all targetUsesGone outcomes, not (null deletion) =
+                [ ( uri
+                  , if uri == defUri
+                      then sortOn (\e -> e._range._start) (es <> deletion)
+                      else es
+                  )
+                | (uri, es) <- fileEdits
+                ]
+            | otherwise = fileEdits
       -- a single-site inline has exactly one target, so an error there
       -- fails the whole action rather than producing an empty edit
       case (scope, [reason | TargetFailed reason <- outcomes]) of
@@ -312,7 +347,7 @@ resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
                 ]
       -- the resolve wrapper requires an edit on every resolved action, so
       -- "nothing to change" is an empty edit rather than a missing one
-      pure $ ca & L.edit ?~ mkWorkspaceEdit fileEdits
+      pure $ ca & L.edit ?~ mkWorkspaceEdit fileEdits'
 
 -- | What rewriting one target file produced: its edit, nothing (no call
 -- sites to rewrite), or the reason no edit was produced.
@@ -323,10 +358,21 @@ resolveProvider recorder state _plId ca uri (InlineResolveData pos scope) = do
 -- support resolve every offered action eagerly, where one failure would
 -- take down the whole code-action menu. 'TargetFailed' is an error.
 data TargetOutcome
-  = TargetEdited (Uri, [TextEdit])
-  | TargetSkipped
+  = TargetEdited (Uri, [TextEdit]) Removability
+  | TargetSkipped Removability
   | TargetNotRewritable T.Text
   | TargetFailed T.Text
+
+-- | What one target's rewrite means for deleting the definition after an
+-- inline-all: whether every reference to the function in this file is
+-- provably eliminated by the edit, and -- for the defining file -- the
+-- vetted edits that delete the definition itself. The deletion edits are
+-- kept out of the target's own edit list because the decision to apply
+-- them needs every other target's verdict too.
+data Removability = Removability
+  { usesGone :: !Bool
+  , deletion :: ![TextEdit]
+  }
 
 -- | Rewrite the call sites of one target file. A failure only concerns
 -- this target; the caller decides whether it aborts the whole action.
@@ -340,9 +386,12 @@ rewriteTarget
   -- ^ Annotated source and typecheck result of the defining module.
   -> FixityEnv
   -- ^ Fixities of the operators the defining module uses.
+  -> Maybe [RealSrcSpan]
+  -- ^ When this target is the defining file and the definition may be
+  -- deleted after a successful inline-all: the spans to delete.
   -> NormalizedFilePath
   -> HandlerM Config TargetOutcome
-rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities target = do
+rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities removal target = do
   maybeInputs <- liftIO $ runAction "InlineFunction.resolve" state $
     runMaybeT $ rewriteInputs target
   case maybeInputs of
@@ -353,8 +402,16 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities ta
           sites = case scope of
             InlineAll    -> allSites
             InlineSingle -> callSiteAt pos allSites
+          -- what a successful rewrite consumes: the reference heading
+          -- each requested site (argument subtrees are spliced back
+          -- verbatim) plus, in the defining file, the definition slated
+          -- for deletion
+          covered = fromMaybe [] removal <> map (.headRef) sites
+          usesGoneAfter grafts =
+            sitesDischarged sites grafts
+              && refsCovered covered cand.name (tmrRenamed check)
       if null sites
-        then pure TargetSkipped
+        then pure $ TargetSkipped (Removability (usesGoneAfter []) [])
         -- the requesting module was vetted when the action was offered
         -- ('findCandidate'), but inline-all reaches further modules whose
         -- extension sets differ; a target that cannot parse the spliced
@@ -378,40 +435,53 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities ta
             Left err -> do
               logWith recorder Logger.Warning (LogBuildEditsFailed err)
               pure $ TargetFailed ("the rewrite failed: " <> T.pack err)
-            -- no call site was rewritten, so don't add imports either
-            Right (_, []) -> pure TargetSkipped
-            -- the edits' line ranges refer to the exact-printed
-            -- (preprocessed) module; one that touches a line the
-            -- preprocessor rewrote -- a CPP directive or a dead '#if'
-            -- branch, blank in the print -- would splice fragments into
-            -- that region of the real document, so the file must be
-            -- left unchanged
-            Right (printed, edits)
-              | editsTouchMangledLines printed contents edits ->
-                  pure $ TargetNotRewritable
-                    "the rewrite would edit lines the preprocessor changed"
-              | otherwise ->
-              case importEdits
-                     (tmrTypechecked defCheck)
-                     (tmrTypechecked check)
-                     source
-                     contents
-                     (clauseRefsFor cand.definition sites) of
-                -- a binding the spliced body needs cannot be imported
-                -- here; inlining would not compile, so the file must be
+            Right (printed, edits, grafts) -> do
+              let usesGone = usesGoneAfter grafts
+                  -- the deletion edits are built against the same
+                  -- exact-printed text as the rewrite's edits, so they
+                  -- are vetted against the real document the same way
+                  removalEdits = case removal of
+                    Just spans
+                      | usesGone
+                      , let ds = deletionEdits printed spans
+                      , not (editsTouchMangledLines printed contents ds)
+                      -> ds
+                    _ -> []
+              case edits of
+                -- no call site was rewritten, so don't add imports either
+                [] -> pure $ TargetSkipped (Removability usesGone [])
+                -- the edits' line ranges refer to the exact-printed
+                -- (preprocessed) module; one that touches a line the
+                -- preprocessor rewrote -- a CPP directive or a dead '#if'
+                -- branch, blank in the print -- would splice fragments into
+                -- that region of the real document, so the file must be
                 -- left unchanged
-                Nothing ->
-                  pure $ TargetNotRewritable
-                    "the inlined body needs a binding that cannot be imported here"
-                Just importTextEdits ->
-                  -- ascending by position: some clients (lsp-test among
-                  -- them) turn the edit list into sequential didChange
-                  -- events and rely on that order, and the import edit
-                  -- would otherwise come last while sitting first
-                  pure $ TargetEdited
-                    ( fromNormalizedUri (filePathToUri' target)
-                    , sortOn (\e -> e._range._start) (edits <> importTextEdits)
-                    )
+                _ | editsTouchMangledLines printed contents edits ->
+                      pure $ TargetNotRewritable
+                        "the rewrite would edit lines the preprocessor changed"
+                  | otherwise ->
+                    case importEdits
+                           (tmrTypechecked defCheck)
+                           (tmrTypechecked check)
+                           source
+                           contents
+                           (clauseRefsFor cand.definition sites) of
+                      -- a binding the spliced body needs cannot be imported
+                      -- here; inlining would not compile, so the file must be
+                      -- left unchanged
+                      Nothing ->
+                        pure $ TargetNotRewritable
+                          "the inlined body needs a binding that cannot be imported here"
+                      Just importTextEdits ->
+                        -- ascending by position: some clients (lsp-test among
+                        -- them) turn the edit list into sequential didChange
+                        -- events and rely on that order, and the import edit
+                        -- would otherwise come last while sitting first
+                        pure $ TargetEdited
+                          ( fromNormalizedUri (filePathToUri' target)
+                          , sortOn (\e -> e._range._start) (edits <> importTextEdits)
+                          )
+                          (Removability usesGone removalEdits)
 
 -- | Files the hiedb reference index knows use @name@. The index only covers
 -- modules that have already been compiled, so it can lag behind the state of

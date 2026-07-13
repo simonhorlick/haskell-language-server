@@ -51,7 +51,10 @@ import           Retrie.CPP                            (CPP (NoCPP), printCPP)
 import           Retrie.ExactPrint.Annotated           (printA, unsafeMkA)
 import           Retrie.Expr                           (mkLocatedHsVar)
 import           Retrie.Fixity                         (FixityEnv, mkFixityEnv)
-import           Retrie.Monad                          (runRetrie)
+import           Retrie.Monad                          (changeReplacements,
+                                                        runRetrie)
+import           Retrie.Replace                        (Replacement (..),
+                                                        ReplacementKind (..))
 import           Retrie.Rewrites.Function              (matchToRewrites)
 import           Retrie.Types                          (Direction (LeftToRight),
                                                         Rewrite)
@@ -71,11 +74,13 @@ buildEdits
   -> (ParsedSource, RenamedSource)
   -- ^ The module whose call sites are rewritten.
   -> InlineCandidate
-  -> IO (Either String (T.Text, [TextEdit]))
-  -- ^ On success, the exact-printed module the edits' line ranges refer
-  -- to, alongside the edits. The print is the /preprocessed/ source, so
-  -- the caller must vet the edits against the real document text with
-  -- 'editsTouchMangledLines' before applying them.
+  -> IO (Either String (T.Text, [TextEdit], [SrcSpan]))
+  -- ^ On success: the exact-printed module the edits' line ranges refer
+  -- to; the edits; and the spans of the call sites the rewrite grafted
+  -- a body into, which definition-removal decisions key on. The print
+  -- is the /preprocessed/ source, so the caller must vet the edits
+  -- against the real document text with 'editsTouchMangledLines'
+  -- before applying them.
 buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
   let defAnnotated    = unsafeMkA (makeDeltaAst defSource) 0
       targetAnnotated = unsafeMkA (makeDeltaAst targetSource) 0
@@ -122,9 +127,9 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
                  (setRewriteTransformer (restrictToSites dispatchSpans))
                  dispatchUniverse
     if null rewrites
-      then pure (rewrites, (T.empty, []))
+      then pure (rewrites, (T.empty, [], []))
       else do
-        (_, rewritten, _change) <-
+        (_, rewritten, change) <-
           runRetrie
             fixities
             (applyWithRenameInfo renameInfo rewrites)
@@ -137,7 +142,12 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
         -- 'Retrie.Replace.renameOccurrences'), so the reprint is complete.
         let before = T.pack (printA targetAnnotated)
             after  = T.pack (printCPP [] rewritten)
-        pure (rewrites, (before, makeDiffTextEdit before after))
+            grafts =
+              [ replLocation r
+              | r <- changeReplacements change
+              , replKind r == ReplGraft
+              ]
+        pure (rewrites, (before, makeDiffTextEdit before after, grafts))
   pure $ case result of
     Left err       -> Left ("retrie failed: " <> show err)
     Right ([], _)  -> Left "no rewrites produced for the function"

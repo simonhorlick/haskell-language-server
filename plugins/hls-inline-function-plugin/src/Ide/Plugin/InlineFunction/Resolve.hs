@@ -2,6 +2,7 @@
 module Ide.Plugin.InlineFunction.Resolve
   ( nameUnderCursor
   , findDefinition
+  , findBinder
   , findAllCallSites
   , selectClauseSites
   , clauseRefsFor

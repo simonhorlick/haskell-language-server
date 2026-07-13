@@ -657,6 +657,7 @@ library hls-inline-function-plugin
     buildable: False
   exposed-modules:
     Ide.Plugin.InlineFunction
+    Ide.Plugin.InlineFunction.Remove
     Ide.Plugin.InlineFunction.Util
   other-modules:
     Ide.Plugin.InlineFunction.Dispatch
@@ -697,6 +698,7 @@ test-suite hls-inline-function-plugin-tests
   main-is:          Main.hs
   build-depends:
     , filepath
+    , ghc
     , ghc-exactprint
     , ghc-paths
     , haskell-language-server:hls-inline-function-plugin

@@ -10,8 +10,12 @@ import           Data.List                               (isSuffixOf)
 import           Data.Maybe                              (mapMaybe)
 import qualified Data.Text                               as T
 import           Development.IDE.Test                    (referenceReady)
+import           GHC.Data.FastString                     (fsLit)
 import           GHC.Paths                               (libdir)
+import           GHC.Types.SrcLoc                        (mkRealSrcLoc,
+                                                          mkRealSrcSpan)
 import qualified Ide.Plugin.InlineFunction               as InlineFunction
+import           Ide.Plugin.InlineFunction.Remove        (deletionEdits)
 import           Language.Haskell.GHC.ExactPrint         (exactPrint,
                                                           makeDeltaAst)
 import           Language.Haskell.GHC.ExactPrint.Parsers (parseExpr,
@@ -683,6 +687,70 @@ soakRegressionTests = testGroup "soak regressions" [
   , crossModuleSyncTest "A RecordWildCards dispatch is not inlined into a second module that lacks the extension" "WildcardPatHave" (Position 15 13) "Inline addP" "WildcardPatLack"
   ]
 
+-- | Inlining every call site of a module-private definition leaves it
+-- unused, so inline-all also deletes the definition and its type
+-- signature. Removal is refused whenever a reference could survive the
+-- rewrite: the definition is exported (modules outside the reference
+-- index may use it), a use is not a rewriteable call site (a visible
+-- type application here), the signature also covers another name, or
+-- only a single use site was inlined. A recursive clause does not block
+-- removal: its self-reference is deleted along with the definition.
+-- Local (let/where) bindings are never removed; the existing Let/Where
+-- goldens pin that.
+removalTests :: TestTree
+removalTests = testGroup "definition removal" [
+    runTest "Inline-all deletes an unexported definition and its signature" "Inline e" "RemoveDefinition" (Position 3 0)
+  , runTest "Inline-all deletes an unexported definition without a signature" "Inline e" "RemoveNoSig" (Position 2 0)
+  , runTest "A single-site inline keeps the definition" "Inline e at this use site" "RemoveUseSiteOnly" (Position 6 4)
+  , runTest "An exported definition is kept" "Inline e" "RemoveExported" (Position 3 0)
+  , runTest "A use under a visible type application keeps the definition" "Inline e" "RemoveResidualRef" (Position 5 0)
+  , runTest "A signature covering two names keeps the definition" "Inline e" "RemoveSharedSig" (Position 3 0)
+  , runTest "A recursive clause inside the deleted definition does not block removal" "Inline e" "RemoveRecursive" (Position 3 0)
+  , serverSyncTest "The module still typechecks after the definition is deleted" "RemoveDefinition" (Position 3 0) "Inline e"
+  ]
+
+-- | Unit tests for the pure pieces of the removal logic.
+pureTests :: TestTree
+pureTests = testGroup "pure" [
+    testGroup "deletion edits" [
+      testCase "deletes whole lines and swallows the following blank" $
+        deletionEdits
+          (T.unlines ["module M where", "", "e :: Int", "e = 1", "", "f = 2"])
+          [lineSpan 3 3, lineSpan 4 4]
+          @?= [wholeLines 2 5]
+    , testCase "keeps a non-blank following line" $
+        deletionEdits
+          (T.unlines ["module M where", "", "e :: Int", "e = 1", "f = 2"])
+          [lineSpan 3 3, lineSpan 4 4]
+          @?= [wholeLines 2 4]
+    , testCase "deletes separated spans independently" $
+        deletionEdits
+          (T.unlines ["module M where", "", "e :: Int", "other = 9", "e = 1", "f = 2"])
+          [lineSpan 3 3, lineSpan 5 5]
+          @?= [wholeLines 2 3, wholeLines 4 5]
+    , testCase "handles a definition at the end of the file" $
+        deletionEdits
+          "module M where\n\ne = 1"
+          [lineSpan 3 3]
+          @?= [wholeLines 2 3]
+    , testCase "covers a multi-line definition" $
+        deletionEdits
+          (T.unlines ["module M where", "e 0 = 0", "e n = n", "", "f = 2"])
+          [lineSpan 2 3]
+          @?= [wholeLines 1 4]
+    ]
+  ]
+  where
+    -- a span within the given 1-based lines; columns are irrelevant to
+    -- whole-line deletion
+    lineSpan l1 l2 =
+      mkRealSrcSpan
+        (mkRealSrcLoc (fsLit "M.hs") l1 1)
+        (mkRealSrcLoc (fsLit "M.hs") l2 5)
+    -- a zero-width whole-line deletion between the given 0-based lines
+    wholeLines a b =
+      L.TextEdit (L.Range (L.Position a 0) (L.Position b 0)) ""
+
 -- | A target file that cannot be rewritten is reported in a warning
 -- notification while the rest of the edit still applies. The session
 -- advertises resolve support so the resolve request can be sent by hand:
@@ -747,6 +815,10 @@ test = testGroup "inline-function" [
     resolveTests
     -- inline-all spans every file that uses the function
   , multiFileTests
+    -- inline-all deletes a definition it leaves unused
+  , removalTests
+    -- unit tests for the pure removal pieces
+  , pureTests
     -- the server's copy of the document must survive the edit too
   , serverSyncTests
     -- known-broken cases found by the soak executable, expectFail until fixed
