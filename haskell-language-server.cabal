@@ -636,6 +636,71 @@ test-suite hls-rename-plugin-tests
     , lsp-types
     , text
 
+
+-----------------------------
+-- inline function plugin
+-----------------------------
+
+flag inlineFunction
+  description: Enable inline function plugin
+  default:     True
+  manual:      True
+
+common inlineFunction
+  if flag(inlineFunction)
+    build-depends: haskell-language-server:hls-inline-function-plugin
+    cpp-options: -Dhls_inlineFunction
+
+library hls-inline-function-plugin
+  import:           defaults, pedantic, warnings
+  if !flag(inlineFunction)
+    buildable: False
+  exposed-modules:
+    Ide.Plugin.InlineFunction
+    Ide.Plugin.InlineFunction.Util
+  other-modules:
+    Ide.Plugin.InlineFunction.Resolve
+    Ide.Plugin.InlineFunction.Rewrite
+  hs-source-dirs:   plugins/hls-inline-function-plugin/src
+  default-extensions:
+    DerivingStrategies
+    LambdaCase
+    OverloadedRecordDot
+    OverloadedStrings
+  build-depends:
+    , aeson
+    , containers
+    , ghc
+    , ghcide                == 2.14.0.0
+    , haskell-language-server:hls-refactor-plugin
+    , hls-plugin-api        == 2.14.0.0
+    , lens                  ^>= 5.3.6
+    , lsp-types
+    , retrie
+    , syb
+    , text
+    , transformers
+
+
+test-suite hls-inline-function-plugin-tests
+  import:           defaults, pedantic, test-defaults, warnings
+  if !flag(inlineFunction)
+    buildable: False
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   plugins/hls-inline-function-plugin/test
+  main-is:          Main.hs
+  build-depends:
+    , filepath
+    , ghc-exactprint
+    , ghc-paths
+    , haskell-language-server:hls-inline-function-plugin
+    , hls-test-utils             == 2.14.0.0
+    , lsp-types
+    , text
+  default-extensions:
+    DerivingStrategies
+    OverloadedStrings
+
 -----------------------------
 -- hlint plugin
 -----------------------------
@@ -1853,6 +1918,7 @@ library
                   , class
                   , eval
                   , importLens
+                  , inlineFunction
                   , rename
                   , hlint
                   , stan
