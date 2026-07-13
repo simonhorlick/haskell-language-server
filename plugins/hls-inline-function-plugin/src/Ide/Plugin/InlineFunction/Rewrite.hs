@@ -46,22 +46,31 @@ import           Retrie.Types                          (Direction (LeftToRight),
                                                         Rewrite)
 import           Retrie.Universe                       (Universe)
 
--- | Build the text edits that inline @candidate@ in @source@.
+-- | Build the text edits that inline @candidate@ into the target module.
+--
+-- The defining module supplies the 'FunBind' the rewrite is constructed
+-- from; it may or may not be the module being rewritten.
 --
 -- The 'FixityEnv' supplies operator precedences so retrie can parenthesize
 -- the substituted body correctly; build one via 'fixityEnvFor'.
 buildEdits
   :: FixityEnv
-  -> ParsedSource
-  -> RenamedSource
+  -> (ParsedSource, RenamedSource)
+  -- ^ The module defining the function being inlined.
+  -> (ParsedSource, RenamedSource)
+  -- ^ The module whose call sites are rewritten.
   -> InlineCandidate
   -> IO (Either String [TextEdit])
-buildEdits fixities source rn candidate = do
-  let annotated  = unsafeMkA (makeDeltaAst source) 0
-      funIdSpan' = candidate.definition.funIdSpan
-      renameInfo = mkRenameInfo rn
+buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
+  let defAnnotated    = unsafeMkA (makeDeltaAst defSource) 0
+      targetAnnotated = unsafeMkA (makeDeltaAst targetSource) 0
+      funIdSpan'      = candidate.definition.funIdSpan
+      -- retrie needs the RenameInfo to cover every module whose source
+      -- contributes to the rewrite: the defining module (the template body
+      -- keeps its source spans) and the module being rewritten.
+      renameInfo      = mkRenameInfo defRn <> mkRenameInfo targetRn
   result <- try @SomeException $ do
-    rewrites <- constructInlineRewrite annotated funIdSpan'
+    rewrites <- constructInlineRewrite defAnnotated funIdSpan'
     if null rewrites
       then pure (rewrites, NoChange)
       else do
@@ -69,7 +78,7 @@ buildEdits fixities source rn candidate = do
           runRetrie
             fixities
             (applyWithRenameInfo renameInfo rewrites)
-            (NoCPP annotated)
+            (NoCPP targetAnnotated)
         pure (rewrites, change)
   pure $ case result of
     Left err -> Left ("retrie failed: " <> show err)

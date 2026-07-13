@@ -659,6 +659,7 @@ library hls-inline-function-plugin
     Ide.Plugin.InlineFunction
     Ide.Plugin.InlineFunction.Util
   other-modules:
+    Ide.Plugin.InlineFunction.Imports
     Ide.Plugin.InlineFunction.Resolve
     Ide.Plugin.InlineFunction.Rewrite
   hs-source-dirs:   plugins/hls-inline-function-plugin/src
@@ -673,6 +674,7 @@ library hls-inline-function-plugin
     , ghc
     , ghcide                == 2.14.0.0
     , haskell-language-server:hls-refactor-plugin
+    , hiedb                 ^>= 0.8.0.0
     , hls-plugin-api        == 2.14.0.0
     , lens                  ^>= 5.3.6
     , lsp-types

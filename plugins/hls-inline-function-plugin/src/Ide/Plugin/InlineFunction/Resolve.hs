@@ -1,25 +1,31 @@
 {-# LANGUAGE CPP #-}
 module Ide.Plugin.InlineFunction.Resolve
-  ( findInlineCandidate
+  ( nameUnderCursor
+  , findDefinition
+  , findAllCallSites
+  , callSiteAt
   , InlineCandidate(..)
   , BindingDef(..)
   , CallSite(..)
+  , CursorSite(..)
   ) where
 
 import           Control.Monad                  (guard)
 import           Data.Generics                  (listify)
+import           Data.List                      (sortOn)
 import qualified Data.Map                       as M
 import           Data.Maybe                     (listToMaybe, mapMaybe)
 import qualified Data.Set                       as S
 import           Development.IDE.Core.RuleTypes (HieAstResult (..))
 import           Development.IDE.GHC.Compat
+import           Development.IDE.GHC.Error      (realSrcSpanToRange)
 import           Development.IDE.Spans.AtPoint  (pointCommand)
 import           GHC.Iface.Ext.Types            (ContextInfo (..), HieAST,
                                                  IdentifierDetails (identInfo))
 import qualified GHC.Iface.Ext.Types            as Hie
 import           Ide.Plugin.InlineFunction.Util (grhsList, hsVarName, location,
                                                  matchPats, toRealSrcSpan)
-import           Language.LSP.Protocol.Types    (Position)
+import           Language.LSP.Protocol.Types    (Position, Range (..))
 
 -- | A fully-applied call to the function: span of the entire applied
 -- expression, plus argument spans (in source order).
@@ -52,41 +58,45 @@ data BindingDef = BindingDef
     -- type class default method's 'Name' is declared by the type signature
     -- in the class header, but the @fun_id@ of the default-method FunBind
     -- is at the implementation site.
+  , bodyRefs  :: ![Name]
+    -- ^ External names the body (including its where clause) references.
+    -- Parameters and body-local binders are internal names, so they are
+    -- excluded automatically. Whatever module the body is spliced into
+    -- must have these in scope.
   }
 
--- | Check the AST for what's currently under the cursor. If it's possible to
--- inline it return an 'InlineCandidate'.
+-- | Where the cursor stood when the candidate was found: on a use of the
+-- function, or on its binding. Only a use identifies a single call site,
+-- so only there can an \"inline this use site\" action be offered.
+data CursorSite = AtUseSite | AtDefinition
+  deriving stock Eq
+
+-- | The term-level identifier under the cursor, provided it stands at a spot
+-- where inlining makes sense: a use of the name or its binding site.
 --
 -- Note: This function should be fast as it is called frequently.
-findInlineCandidate
-  :: HieAstResult
-  -> RenamedSource
-  -> Position
-  -> Maybe InlineCandidate
-findInlineCandidate HAR{hieAst} rn pos = do
+nameUnderCursor :: HieAstResult -> Position -> Maybe (Name, CursorSite)
+nameUnderCursor HAR{hieAst} pos = do
   -- extract the identifiers under the cursor
   let names = concat $ pointCommand hieAst pos extractNames
   -- restrict to identifiers at valid inline sites
-  (name, _, _) <- listToMaybe $ filter
-    (\(n, ctxs, _) ->
-      isInlineSite ctxs &&
+  (name, ctxs, _) <- listToMaybe $ filter
+    (\(n, ctxs', _) ->
+      isInlineSite ctxs' &&
       -- omit identifiers that are types
       not (isTyConName n || isTyVarName n))
     names
-  binder <- findBinder rn name
-  -- check whether this binder is appropriate for inlining
-  definition <- checkBinder binder
-  let
-    arity = length definition.params
-    sites = findAllCallSites rn name arity
-  -- omit the candidate entirely when there is nothing to rewrite
-  guard $ not (null sites)
-  pure $
-    InlineCandidate
-      { name       = name
-      , definition = definition
-      , sites      = sites
-      }
+  let site = if any isUse ctxs then AtUseSite else AtDefinition
+  pure (name, site)
+  where
+    isUse = \case
+      Use -> True
+      _   -> False
+
+-- | Search the defining module's renamed source for @name@'s binding and
+-- check it has a form we can inline.
+findDefinition :: RenamedSource -> Name -> Maybe BindingDef
+findDefinition rn name = checkBinder =<< findBinder rn name
 
 -- | Find all call sites of @name@ in the renamed source.
 --
@@ -128,6 +138,38 @@ findAllCallSites rn name arity = mapMaybe toCallSite $ listify isCandidate rn
                 argSps <- traverse location args
                 pure CallSite { application = appSp, arguments = argSps }
           _ -> Nothing
+
+-- | The call site under the cursor. When call sites nest -- @e (e 2)@ --
+-- the innermost one containing the position wins.
+--
+-- 'findAllCallSites' also records each bare reference to the function as a
+-- site (the partial-application case). A bare reference that is merely the
+-- head of an enclosing call site is not an independent site -- retrie
+-- rewrites the enclosing application, so selecting the bare head would
+-- filter every replacement away. Drop those before choosing.
+callSiteAt :: Position -> [CallSite] -> [CallSite]
+callSiteAt pos sites =
+  take 1 $ sortOn size $ filter contains independent
+  where
+    independent = filter (not . subsumedBareRef) sites
+    subsumedBareRef site =
+      null site.arguments &&
+      any
+        (\other ->
+          other.application /= site.application &&
+          rangeOf other.application `containsRange` rangeOf site.application)
+        sites
+    contains site =
+      let Range start end = rangeOf site.application
+      in start <= pos && pos <= end
+    containsRange (Range outerS outerE) (Range innerS innerE) =
+      outerS <= innerS && innerE <= outerE
+    rangeOf = realSrcSpanToRange
+    size site =
+      let sp = site.application
+      in ( srcSpanEndLine sp - srcSpanStartLine sp
+         , srcSpanEndCol sp - srcSpanStartCol sp
+         )
 
 -- In the AST a fully-applied function 'f 1 2' takes the form
 -- 'App (App (Var f) (Lit 1)) (Lit 2)', we want the function 'f' and the
@@ -223,6 +265,7 @@ checkMatch funName funIdSp (L _ Match{m_pats, m_grhss}) = do
     BindingDef
       { params    = params
       , funIdSpan = funIdSp
+      , bodyRefs  = listify isExternalName m_grhss
       }
 
 -- Check whether this binding fits our requirements for inlining.
