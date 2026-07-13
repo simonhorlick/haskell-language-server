@@ -14,12 +14,12 @@ combine :: Int -> Wrap -> Int
 combine k Wrap{..} = k + doc
 
 -- The call site binds a local 'doc' that feeds a RecordWildCards construction.
--- retrie's capture analysis does not see the dispatch's own 'Wrap{..}' bind
--- 'doc' (wildcard binders are implicit), so it treats the spliced body's 'doc'
--- as free and renames the outer 'doc' to 'doc1' to avoid capture. The 'Rec{..}'
--- construction reads its 'doc' field from a variable spelled 'doc', so the
--- rename leaves the field unsupplied and the module no longer typechecks
--- ("Constructor 'Rec' does not have the required strict field(s) doc").
+-- retrie's capture analysis once missed the dispatch's own 'Wrap{..}' binding
+-- 'doc' (wildcard binders are implicit), treating the spliced body's 'doc' as
+-- free and flagging the outer 'doc' as capturing: under refusal semantics
+-- that would wrongly refuse this site (and under capture-renaming it broke
+-- the 'Rec{..}' construction). Pattern binders resolve through the renamed
+-- source, so the dispatch binder shadows correctly and the inline proceeds.
 mk :: Int -> Wrap -> Rec
 mk k w =
   let doc   = 7

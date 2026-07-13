@@ -7,11 +7,12 @@
 -- rewrite from the function being inlined and hand it to retrie's public
 -- 'applyWithRenameInfo', supplying a 'RenameInfo' derived from the renamed
 -- source (so capture-avoiding substitution and @RecordWildCards@ binders
--- are handled by retrie). Retrie returns the fully rewritten module -- with
--- its capture-avoiding renames folded into the AST -- which we exact-print
--- and diff against the original print to produce LSP 'TextEdit's, letting
--- exact-print lay out multi-line grafts rather than reassembling them from
--- replacement fragments.
+-- are handled by retrie, and a site where an enclosing binder would
+-- capture a variable of the body is refused). Retrie returns the fully
+-- rewritten module, which we exact-print and diff against the original
+-- print to produce LSP 'TextEdit's, letting exact-print lay out
+-- multi-line grafts rather than reassembling them from replacement
+-- fragments.
 module Ide.Plugin.InlineFunction.Rewrite
   ( buildEdits
   , editsTouchMangledLines
@@ -47,14 +48,15 @@ import           Retrie                                (Annotated,
                                                         astA, mkRenameInfo,
                                                         setRewriteTransformer,
                                                         toURewrite, transformA)
+import           Retrie.ContextCapture                 (CaptureEvent)
 import           Retrie.CPP                            (CPP (NoCPP), printCPP)
 import           Retrie.ExactPrint.Annotated           (printA, unsafeMkA)
 import           Retrie.Expr                           (mkLocatedHsVar)
 import           Retrie.Fixity                         (FixityEnv, mkFixityEnv)
-import           Retrie.Monad                          (changeReplacements,
+import           Retrie.Monad                          (changeCaptureEvents,
+                                                        changeReplacements,
                                                         runRetrie)
-import           Retrie.Replace                        (Replacement (..),
-                                                        ReplacementKind (..))
+import           Retrie.Replace                        (Replacement (..))
 import           Retrie.Rewrites.Function              (matchToRewrites)
 import           Retrie.Types                          (Direction (LeftToRight),
                                                         Rewrite)
@@ -74,13 +76,14 @@ buildEdits
   -> (ParsedSource, RenamedSource)
   -- ^ The module whose call sites are rewritten.
   -> InlineCandidate
-  -> IO (Either String (T.Text, [TextEdit], [SrcSpan]))
+  -> IO (Either String (T.Text, [TextEdit], [SrcSpan], [CaptureEvent]))
   -- ^ On success: the exact-printed module the edits' line ranges refer
-  -- to; the edits; and the spans of the call sites the rewrite grafted
-  -- a body into, which definition-removal decisions key on. The print
-  -- is the /preprocessed/ source, so the caller must vet the edits
-  -- against the real document text with 'editsTouchMangledLines'
-  -- before applying them.
+  -- to; the edits; the spans of the call sites the rewrite grafted a
+  -- body into (definition-removal decisions key on these); and the
+  -- sites retrie refused because a binding enclosing them would capture
+  -- a variable of the body. The print is the /preprocessed/ source, so
+  -- the caller must vet the edits against the real document text with
+  -- 'editsTouchMangledLines' before applying them.
 buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
   let defAnnotated    = unsafeMkA (makeDeltaAst defSource) 0
       targetAnnotated = unsafeMkA (makeDeltaAst targetSource) 0
@@ -127,7 +130,7 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
                  (setRewriteTransformer (restrictToSites dispatchSpans))
                  dispatchUniverse
     if null rewrites
-      then pure (rewrites, (T.empty, [], []))
+      then pure (rewrites, (T.empty, [], [], []))
       else do
         (_, rewritten, change) <-
           runRetrie
@@ -142,12 +145,12 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
         -- 'Retrie.Replace.renameOccurrences'), so the reprint is complete.
         let before = T.pack (printA targetAnnotated)
             after  = T.pack (printCPP [] rewritten)
-            grafts =
-              [ replLocation r
-              | r <- changeReplacements change
-              , replKind r == ReplGraft
-              ]
-        pure (rewrites, (before, makeDiffTextEdit before after, grafts))
+            grafts = map replLocation (changeReplacements change)
+            captureRefusals = changeCaptureEvents change
+        pure
+          ( rewrites
+          , (before, makeDiffTextEdit before after, grafts, captureRefusals)
+          )
   pure $ case result of
     Left err       -> Left ("retrie failed: " <> show err)
     Right ([], _)  -> Left "no rewrites produced for the function"

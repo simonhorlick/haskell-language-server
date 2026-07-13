@@ -105,14 +105,14 @@ resolveTests = testGroup "resolve" [
   -- binding.
   , runTest "Duplicates the argument when a parameter is used multiple times" "Inline e" "DuplicateArg" (Position 8 4)
   , runTest "Offers inlining for let bindings" "Inline e" "Let2" (Position 5 5)
-  , runTest "Handle capture for let bindings" "Inline e" "Let3" (Position 5 10)
+  , runTest "Refuses a let call site whose binding would capture the body" "Inline e" "Let3" (Position 5 10)
   , runTest "Offers inlining for bindings in where clauses" "Inline e" "Where" (Position 2 6)
   , runTest "Offers inlining for operators" "Inline */" "Operator" (Position 4 8)
   , runTest "Offers inlining for qualified names" "Inline e" "Qualified" (Position 5 6)
   , runTest "Inlines a function that uses overloaded record fields" "Inline e" "Overloaded" (Position 10 18)
-  , runTest "Issues substitutions where a free variable of e is captured by a binder outside of e" "Inline e" "CaptureWhere" (Position 9 6)
-  , runTest "Picks a fresh name that avoids a top-level definition the surrounding code refers to" "Inline e" "FreshCollision" (Position 12 6)
-  , runTest "Renames a capturing binder when the captured free variable is a local binding (no qualified form)" "Inline e" "CaptureLocalBinding" (Position 7 25)
+  , runTest "Refuses a call site where a where-binding would capture a free variable of e" "Inline e" "CaptureWhere" (Position 9 6)
+  , runTest "Refuses a capturing call site rather than renaming around a fresh-name collision" "Inline e" "FreshCollision" (Position 12 6)
+  , runTest "Refuses a capturing call site when the captured free variable is a local binding (no qualified form)" "Inline e" "CaptureLocalBinding" (Position 7 25)
   , runTest "Renames a RecordWildCards binding in the body that would otherwise capture an argument" "Inline e" "RecordWildCards" (Position 14 6)
   , runTest "Renames an explicit RecordWildCards binding in the body that would otherwise capture an argument" "Inline e" "RecordWildCardsExplicit" (Position 10 6)
   , runTest "Un-puns an explicit field beside a '..' wildcard, leaving the wildcard alone" "Inline e" "RecordWildCardsPun" (Position 12 6)
@@ -189,7 +189,7 @@ resolveTests = testGroup "resolve" [
   -- binders travel intact.
   , runTest "Inlines a wildcard construction from parameters as a dispatch" "Inline mk" "RecordWildCardsConstruct" (Position 10 4)
   , runTest "Inlines a wildcard argument binding as a dispatch" "Inline e" "RecordWildCards2" (Position 14 6)
-  , runTest "Alpha-renames a captured identifier that appears inside an argument" "Inline e" "ArgRename" (Position 12 6)
+  , runTest "Refuses a capturing call site even when the capture is via the argument" "Inline e" "ArgRename" (Position 12 6)
   , runTest "Appends an import the inlined body needs to the use-site file when inlining across files" "Inline e" "CrossFileUse" (Position 5 4)
   -- The body's references are checked with the spelling the source uses:
   -- a qualified-only import at the use site does not satisfy the body's
@@ -272,7 +272,7 @@ multiFileTests = testGroup "multi-file" [
 serverSyncTests :: TestTree
 serverSyncTests = testGroup "server sync" [
     serverSyncTest "with an import edit above the call site" "CrossFileUse" (Position 5 4) "Inline e"
-  , serverSyncTest "with a capture rename beside the call site" "Let3" (Position 5 10) "Inline e"
+  , serverSyncTest "with a capture refusal beside the call site" "Let3" (Position 5 10) "Inline e"
   ]
 
 serverSyncTest :: TestName -> FilePath -> Position -> T.Text -> TestTree
@@ -464,51 +464,31 @@ soakRegressionTests = testGroup "soak regressions" [
     -- 'doc', so the rename left the field unsupplied ("Constructor 'Rec'
     -- does not have the required strict field(s) doc"). Fixed by the same
     -- per-pattern binder resolution as PunCapture above.
-  , serverSyncTest "A capture rename does not break a RecordWildCards construction that reads the renamed name" "WildcardConstruct" (Position 25 14) "Inline combine"
+  , serverSyncTest "A dispatch-bound wildcard name is not misdetected as a capture" "WildcardConstruct" (Position 25 14) "Inline combine"
     -- Constructed from the PunCapture analysis (not soak-found): a genuine
     -- capture. The inlined body references the top-level field selector
     -- 'name', and the call site binds 'name' as a NamedFieldPuns pun,
-    -- shadowing the selector -- so the spliced reference must not be left
-    -- bare. Two retrie defects used to stack up here: its rename index
-    -- only recorded HsVar occurrences (a selector occurrence is an XExpr
-    -- HsRecSelRn node in the renamed AST), so the capture went entirely
-    -- undetected and the graft silently rebound 'name b' to the pun
-    -- binder -- an 'Int' applied to an argument, a *deferred* type error
-    -- in the IDE session, invisible to 'serverSyncTest' (waitForTypecheck
-    -- reports success); hence a golden test. And executing the rename
-    -- would have patched the occurrence span, which for a pun is the
-    -- field label (yielding the invalid 'Bench{name1}'). Fixed by
-    -- indexing selector occurrences and expanding a renamed pun to
-    -- 'Bench{name = name1}' (retrie's captureRenames/renameOccurrences).
-  , runTest "A captured field-selector reference renames and expands the enclosing pun binder" "Inline total" "PunSelectorCapture" (Position 16 25)
+    -- shadowing the selector -- so the body must not be spliced bare.
+    -- retrie's rename index once recorded only HsVar occurrences (a
+    -- selector occurrence is an XExpr HsRecSelRn node in the renamed
+    -- AST), so the capture went entirely undetected and the graft
+    -- silently rebound 'name b' to the pun binder -- an 'Int' applied to
+    -- an argument, a *deferred* type error in the IDE session, invisible
+    -- to 'serverSyncTest' (waitForTypecheck reports success); hence a
+    -- golden with an unchanged expectation, pinning the refusal.
+  , runTest "A captured field-selector reference refuses the call site under a pun binder" "Inline total" "PunSelectorCapture" (Position 16 25)
     -- The same capture through a RecordWildCards binder instead of a pun
-    -- (not soak-found). The capturing binder's binding occurrence is the
-    -- '..' token itself, which offers no identifier to patch in place, so
-    -- the capture-avoiding rename expands the wildcard: the renamed
-    -- binder is pulled out into an explicit field, 'Bench{name = name1,
-    -- ..}', and the '..' is kept for whatever else it binds (retrie's
-    -- captureRenames/renameOccurrences, mirroring what expandWildcardPat
-    -- does for template-side renames). A wrong outcome either splices
-    -- with the capture (no detection) or renames the uses but not the
-    -- '..' binding, leaving them out of scope; both fail the comparison.
-  , runTest "A capture by a RecordWildCards pattern binder expands the wildcard when renaming" "Inline total" "WildcardSelectorCapture" (Position 16 23)
-    -- The same expansion on the construction side: the renamed binder is
-    -- read implicitly by a 'Rec{..}' record construction elsewhere in its
-    -- scope, so the construction gains an explicit 'doc = doc1' field.
-  , runTest "A capture rename expands a wildcard construction that reads the renamed binder" "Inline f" "WildcardConstructCapture" (Position 15 18)
-    -- ...but when the implicit occurrence sits inside the call's own
-    -- argument ('f Rec{..}'), the application-form rewrite cannot rename
-    -- it: argument text is re-printed as part of the graft
-    -- (renameSubstOccurrences rewrites variable nodes by resolved Name,
-    -- and an implicit wildcard read has none), and the span-keyed
-    -- expansion only patches occurrences outside the match span. retrie
-    -- refuses that match (replaceImpl's renameReachesAll); the
-    -- bare-reference rewrite then matches just 'f', the argument stays in
-    -- place at its own span, and the expansion repairs it there. Without
-    -- the refusal the application form would win and re-print the
-    -- argument's 'Rec{..}' unexpanded, reading a variable that no longer
-    -- exists.
-  , runTest "A capture whose wildcard occurrence is inside the call argument falls back to a lambda" "Inline f" "WildcardArgCapture" (Position 18 8)
+    -- (not soak-found): the capturing binder is implicit in the '..', so
+    -- detection must see wildcard-introduced binders (riPatBinders via
+    -- the renamed source) to refuse the site.
+  , runTest "A capture by a RecordWildCards pattern binder refuses the call site" "Inline total" "WildcardSelectorCapture" (Position 16 23)
+    -- The same detection where the capturing binder is read implicitly
+    -- by a 'Rec{..}' record construction elsewhere in its scope.
+  , runTest "A capture read by a wildcard construction refuses the call site" "Inline f" "WildcardConstructCapture" (Position 15 18)
+    -- ...and where the implicit occurrence sits inside the call's own
+    -- argument ('f Rec{..}'): both the application-form and the
+    -- bare-reference rewrite see the capturing binder and refuse.
+  , runTest "A capture whose wildcard occurrence is inside the call argument refuses the site" "Inline f" "WildcardArgCapture" (Position 18 8)
     -- Found on ghcide's mkHiFileResult (Compile.hs -> GHC.Util's
     -- fingerprintToBS, and Session.hs's writeTaskQueue): the inlined function
     -- matches its argument with a constructor pattern ('Fingerprint a b',
@@ -635,18 +615,14 @@ soakRegressionTests = testGroup "soak regressions" [
     -- preprocessor-rewritten line is refused; golden with an unchanged
     -- expectation, since refusing the file is the only safe outcome.
   , runTest "A splice whose edits touch a CPP region leaves the file unchanged" "Inline e" "CppRegionUse" (Position 16 4)
-    -- A hole the vetting cannot see: rename information is built from the
-    -- renamed source, which covers only the *active* CPP branch. A
-    -- capture-avoiding rename patches the binder and its active-branch
-    -- occurrences -- all on clean lines, so the vetting passes -- while
-    -- occurrences of the same binder inside a non-active branch are
-    -- invisible and keep the old name: under the other CPP configuration
-    -- they silently rebind to whatever the old name now resolves to. The
-    -- active configuration still typechecks, so only a golden can see it;
-    -- expected is the unchanged file, since without rename information for
-    -- every branch the only safe outcome is refusing the rewrite.
-    -- (expectFail until fixed.)
-  , expectFail $ runTest "A capture rename with occurrences in a non-active CPP branch leaves the file unchanged" "Inline e at this use site" "CppRenameUse" (Position 22 5)
+    -- A capturing call site in a CPP file, with occurrences of the
+    -- capturing binder inside a non-active branch. Under the old
+    -- capture-renaming semantics this was a pinned hole: the rename
+    -- patched only active-branch occurrences (rename information covers
+    -- only the active branch), silently rebinding the non-active ones.
+    -- A capturing site is now refused outright, which is exactly the
+    -- unchanged-file expectation.
+  , runTest "A capturing call site in a non-active CPP branch leaves the file unchanged" "Inline e at this use site" "CppRenameUse" (Position 22 5)
     -- ...whereas a multi-line splice whose edits stay on clean lines (the
     -- CPP block is elsewhere in the file) applies through the whole-module
     -- reprint and keeps its layout.

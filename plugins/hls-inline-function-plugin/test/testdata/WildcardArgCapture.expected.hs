@@ -8,12 +8,12 @@ f :: Rec -> Int
 f r = doc r + 1
 
 -- The captured binder's implicit occurrence sits in the call's own
--- argument: 'Rec{..}' reads g's 'doc'. The application-form rewrite
--- captures the argument into a substitution value whose text is
--- re-printed as part of the graft, where the implicit read has no
--- variable node to rewrite -- so that match must be refused. The
--- bare-reference rewrite then matches just 'f', leaving the argument in
--- place at its own span, where the wildcard expansion repairs it:
--- '(\ r -> doc r + 1) Rec{doc = doc1, ..}'.
+-- argument: 'Rec{..}' reads g's 'doc', and g's 'doc' would capture the
+-- body's selector reference. Both rewrite forms see the capturing
+-- binder -- the application form refuses the whole call, and the
+-- bare-reference form's lambda template carries the same free selector
+-- reference, so it refuses the lone 'f' too -- leaving the file
+-- unchanged. The lambda fallback with the wildcard expanded lives on
+-- the capture-rename branches.
 g :: Int -> Int
-g doc1 = (\ r -> doc r + 1) Rec{doc = doc1, ..}
+g doc = f Rec{..}

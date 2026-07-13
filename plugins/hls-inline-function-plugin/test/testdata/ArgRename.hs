@@ -1,8 +1,8 @@
 module ArgRename where
 
--- The call-site binder 'y' (f's parameter) would capture e's free 'y', so it
--- is renamed. The renamed binder also appears *inside the argument* '(y + 1)',
--- so the alpha-rename must reach into the argument expression too.
+-- The call-site binder 'y' (f's parameter) would capture e's free 'y':
+-- the call site is refused and the file left unchanged (capture-renaming
+-- lives on the capture-rename posterity branches).
 y :: Int
 y = 0
 

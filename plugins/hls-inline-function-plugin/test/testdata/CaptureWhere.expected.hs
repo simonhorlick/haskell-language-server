@@ -7,5 +7,5 @@ e :: Int -> Int
 e x = x + y
 
 f :: Int -> Int
-f x = x + y + y1
-  where y1 = 100
+f x = e x + y
+  where y = 100
