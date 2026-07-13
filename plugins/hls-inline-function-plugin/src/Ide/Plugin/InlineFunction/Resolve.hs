@@ -550,6 +550,11 @@ spliceExtensions = nub . everything (++) ([] `mkQ` exprExts `extQ` patExts)
     exprExts (HsLam _ LamCase _)  = [LambdaCase]
     exprExts (HsLam _ LamCases _) = [LambdaCase]
     exprExts HsMultiIf{}          = [MultiWayIf]
+    exprExts (ExplicitTuple _ args _)
+      | any isMissing args        = [TupleSections]
+      where
+        isMissing Missing{} = True
+        isMissing _         = False
     exprExts _                    = []
 
     patExts :: Pat GhcRn -> [Extension]

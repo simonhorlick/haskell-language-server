@@ -595,6 +595,21 @@ soakRegressionTests = testGroup "soak regressions" [
     -- view pattern into a case alternative spliced at the target, which lacks
     -- the extension ("Illegal view pattern") -- so no action is offered.
   , runActionTest "A view-pattern clause is not dispatched into a module that lacks the extension" "ViewPatternUse" (Position 10 11) []
+    -- Found on retrie's dfnsToRewrites and typeSynonymsToRewrites
+    -- (Rewrites.hs is Haskell2010): the body contains a tuple section, which
+    -- parses only under TupleSections; splicing it into a target lacking the
+    -- extension would not parse ("Illegal tuple section"), so no action is
+    -- offered.
+  , runActionTest "A tuple-section body is not inlined into a module that lacks the extension" "TupleSectionUse" (Position 10 10) []
+    -- Found on retrie's mkVarPat inlined into Subst.unpunRenamedFields: the
+    -- definition's signature discharged a class constraint at a concrete
+    -- instance, and splicing the body into a signature-less where binder
+    -- makes GHC re-infer that binder's type, floating a non-type-variable
+    -- constraint the target's language edition rejects ("Non type-variable
+    -- argument in the constraint... Perhaps FlexibleContexts"). A semantic
+    -- effect of losing the signature, invisible to the syntactic extension
+    -- guard. (expectFail until fixed.)
+  , expectFail $ serverSyncTest "An inlined body does not float constraints its signature solved" "SigDischargeUse" (Position 30 11) "Inline render"
     -- Found on hls-test-utils' standardizeQuotes: the body is a "hanging"
     -- 'let' -- the keyword at the end of the equation's first line, the
     -- bindings and a dedented 'in' left of it -- so its column deltas are
@@ -632,6 +647,22 @@ soakRegressionTests = testGroup "soak regressions" [
     -- CPP block is elsewhere in the file) applies through the whole-module
     -- reprint and keeps its layout.
   , runTest "A multi-line splice in a CPP file keeps its indentation" "Inline e at this use site" "CppIndentUse" (Position 22 10)
+    -- Found on ghcide's FindImports 'notFound' (and ten sibling soak
+    -- violations: showPosition, Spans.Common 'go', compute,
+    -- callStackToSrcLoc, generalCompls, getNextPragmaInfo): a multi-line
+    -- body spliced inside a '\case' alternative kept its continuation
+    -- lines at their original columns. ghc-exactprint printed lambda-case
+    -- alternatives without establishing a layout context ('\case' opens
+    -- one like 'case..of' does), so grafted subtrees resolved their
+    -- column deltas against the enclosing (top-level) offset and landed
+    -- left of the alternative's layout ("parse error"). Fixed in
+    -- ghc-exactprint's HsLam/HsCmdLam; the goldens pin the re-based
+    -- layout for a record construction spliced as a record-update head
+    -- and a case body spliced into a parenthesized operand.
+  , serverSyncTest "A multi-line record construction re-bases its columns at a deeper splice site" "RecordConstructMulti" (Position 23 10) "Inline mkR"
+  , serverSyncTest "A multi-line case body re-bases its columns at a deeper splice site" "CaseBodyIndent" (Position 19 17) "Inline s"
+  , runTest "A record construction spliced under a lambda-case keeps valid layout (layout)" "Inline mkR" "RecordConstructMulti" (Position 23 10)
+  , runTest "A case body spliced under a lambda-case keeps valid layout (layout)" "Inline s" "CaseBodyIndent" (Position 19 17)
     -- Found on hls-cabal-plugin's cabalPositionToLSPPosition (Position): the
     -- spliced body needs a data constructor not in scope at the target, so
     -- the plugin imports it through its parent type ('import M (Name(Name))').
