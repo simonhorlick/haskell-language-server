@@ -148,6 +148,40 @@ resolveTests = testGroup "resolve" [
   -- mirroring the parenthesized-infix one (see InfixExtraArg).
   , runTest "Inlines a backtick section applied to its remaining argument" "Inline add" "SectionApp" (Position 3 0)
   , runTest "Parenthesizes a body that is an expression type signature" "Inline e" "TySig" (Position 9 10)
+  , runTest "Inlines a single-clause constructor pattern when the argument matches it" "Inline e" "Pattern" (Position 5 4)
+  , runTest "Inlines a single-clause tuple pattern when the argument is a tuple literal" "Inline e" "PatternTuple" (Position 6 4)
+  -- Multi-clause definitions: a site is only rewritten when the clause
+  -- that fires there is decidable from the argument's syntax. In
+  -- MultiClauseCon both sites decide (constructor heads differ
+  -- definitely); in MultiClauseLit only 'e 0' does -- 'e 5' stays,
+  -- because two different overloaded literals may still be equal under
+  -- a lawless Num/Eq instance.
+  , runTest "Inlines the clause a constructor argument selects" "Inline e" "MultiClauseCon" (Position 7 4)
+  , runTest "Inlines an equal-literal site but not a different-literal one" "Inline e" "MultiClauseLit" (Position 7 4)
+  -- Only the selected clause must pass the per-clause checks: the base
+  -- case of a recursive definition inlines even though the recursive
+  -- clause never can.
+  , runTest "Inlines the base case of a recursive multi-clause definition" "Inline e" "MultiClauseRecursive" (Position 7 4)
+  -- A guarded clause can fall through even when its patterns match, so
+  -- it is never selected; a site that decides an earlier unguarded
+  -- clause inlines that clause, and one that reaches the guarded clause
+  -- splices the whole dispatch instead.
+  , runTest "Inlines a clause decided before a guarded one, dispatching the rest" "Inline e" "MultiClauseGuard" (Position 9 4)
+  -- Tier 2: when no single clause is decidable from the argument's
+  -- syntax, the call is rewritten to a case expression carrying the
+  -- definition's whole dispatch -- clauses, guards and where blocks
+  -- verbatim -- so the runtime choice is preserved.
+  , runTest "Splices the whole dispatch when no clause is decidable" "Inline e" "MultiClause" (Position 7 4)
+  , runTest "Splices a guarded definition as a case keeping its guards" "Inline e" "Guards" (Position 8 4)
+  , runTest "Scrutinises an argument tuple for a multi-parameter dispatch" "Inline e" "MultiClauseTuple" (Position 7 6)
+  -- A bare reference has no arguments to decide with; the dispatch is
+  -- wrapped in a lambda binding fresh argument names.
+  , runTest "Wraps the dispatch in a lambda for a bare reference" "Inline e" "MultiClausePartial" (Position 7 8)
+  -- Substitution would disconnect a record wildcard from parameters
+  -- feeding it, but a dispatch keeps the patterns, so the wildcard's
+  -- binders travel intact.
+  , runTest "Inlines a wildcard construction from parameters as a dispatch" "Inline mk" "RecordWildCardsConstruct" (Position 10 4)
+  , runTest "Inlines a wildcard argument binding as a dispatch" "Inline e" "RecordWildCards2" (Position 14 6)
   , runTest "Alpha-renames a captured identifier that appears inside an argument" "Inline e" "ArgRename" (Position 12 6)
   , runTest "Appends an import the inlined body needs to the use-site file when inlining across files" "Inline e" "CrossFileUse" (Position 5 4)
   -- The body's references are checked with the spelling the source uses:
@@ -254,8 +288,10 @@ soakRegressionTests = testGroup "soak regressions" [
     -- RecordWildCards from the function's own parameters. Substitution
     -- replaces the parameters with the argument expressions, so the
     -- names feeding the wildcard vanish and the construction does not
-    -- compile. The candidate is not offered.
-  , runActionTest "RecordWildCards construction from parameters offers no Inline action" "RecordWildCardsConstruct" (Position 10 4) []
+    -- compile; clause selection refuses the clause and the site inlines
+    -- as a dispatch instead (patterns kept, wildcard intact). The
+    -- dispatch output must still typecheck server-side.
+  , serverSyncTest "RecordWildCards construction from parameters inlines as a dispatch" "RecordWildCardsConstruct" (Position 10 4) "Inline mk"
     -- ...but a wildcard fed by where binders travels with the body
     -- (they become let bindings at the splice), so that shape stays
     -- offerable and must still typecheck after inlining. This guards
@@ -320,6 +356,37 @@ soakRegressionTests = testGroup "soak regressions" [
         executeCodeAction action
         contents <- documentContents doc
         liftIO $ contents @?= original
+    -- Found on graphql-engine's schema-parsers Directives.hs (the built-in
+    -- directive names, e.g. Name._cached = [G.name|cached|]): the inlined
+    -- binding's body is a quasi-quote, which parses only because its
+    -- defining module enables QuasiQuotes. Splicing the body verbatim into a
+    -- use site whose module does not enable QuasiQuotes yields "parse error
+    -- on input |]" -- the plugin appends the quasi-quoter's import but cannot
+    -- add the language extension the spliced syntax needs, so the target no
+    -- longer parses. A body from a QuasiQuotes module is therefore never
+    -- inlined: no action is offered on 'greeting' (defined in QuasiQuoteDef,
+    -- which enables the extension), even though the use site is elsewhere.
+  , runActionTest "A body defined in a QuasiQuotes module offers no Inline action" "QuasiQuoteUse" (Position 5 14) []
+    -- Found on ghcide's DependencyInformation.hs (partitionNodeResults): the
+    -- inlined body carries a where clause whose helper 'f' is defined by two
+    -- equations. At the call site two names -- 'imps' from the enclosing
+    -- pattern and 'errs' from the binding the splice lands in -- collide with
+    -- the helper's parameters, so retrie capture-renames them ('imps'->'imps1',
+    -- 'errs'->'errs1'). The rename widens the line before the splice, shifting
+    -- it one column right, but the continuation lines of the multi-line let
+    -- (the where-turned-let's second equation) are indented from the original
+    -- pre-shift column -- so the two 'f' equations land one column apart and
+    -- the layout no longer parses ("parse error on input f").
+  , expectFail $ serverSyncTest "A capture rename beside the splice keeps a multi-equation where-let aligned" "WhereMultiEqn" (Position 10 0) "Inline partitionNodeResults"
+    -- Found on ghcide's Session.hs (retryOnSqliteBusy): the inlined body is a
+    -- 'let ... in ...' expression. When the call site is a statement in a do
+    -- block, the body is spliced at the do-statement column, where its 'let'
+    -- is parsed as a do let-statement and the following 'in' -- landing at the
+    -- same layout column -- gets a statement separator before it, so it no
+    -- longer parses ("parse error on input in"). The spliced 'let ... in' must
+    -- be indented past the do-statement column (or parenthesized) to stay one
+    -- expression.
+  , expectFail $ serverSyncTest "A let-in body is inlined correctly into a do-block statement" "DoBlockLetIn" (Position 3 0) "Inline retryBusy"
   ]
 
 -- | A target file that cannot be rewritten is reported in a warning
@@ -365,16 +432,12 @@ actionTests = testGroup "action" [
   -- instances may exist in other modules or be added later.
   , runActionTest "Class methods offer no Inline action" "Class" (Position 6 6) []
   , runActionTest "Functions that recurse via their where clause cannot be inlined" "WhereRecursion" (Position 11 4) []
-  , runActionTest "Functions consisting of guards cannot be inlined" "Guards" (Position 8 4) []
   , runActionTest "Pattern bindings cannot be inlined" "PatternBind" (Position 5 4) []
-  , runActionTest "Bindings with multiple clauses cannot be inlined" "MultiClause" (Position 7 4) []
   , runActionTest "Imported names cannot be inlined" "Imported" (Position 5 4) []
   , runActionTest "Functions with no call sites offer no Inline action" "Uncalled" (Position 3 0) []
   , runActionTest "Offers inlining for a definition imported from a local module" "LocalImport" (Position 4 6) ["Inline e", "Inline e at this use site"]
-  , runActionTest "Does not offer inlining when there is a RecordWildCards binding in the arguments" "RecordWildCards2" (Position 15 6) []
   , runActionTest "Does not offer inlining when a forall'd type variable in the body would be captured at the call site" "ImplicitForall" (Position 14 8) []
   , runActionTest "Does not offer inlining when a forall'd type variable is referenced only from the where clause" "WhereTyVar" (Position 14 4) []
-  , runActionTest "Prevent inlining when the function contains a pattern bind" "Pattern" (Position 5 4) []
   -- A backtick-section operator sits inside the parenthesized section,
   -- which is a rewriteable site of its own, so both scopes are offered.
   , runActionTest "Offers both inline scopes on a backtick-section operator" "Section" (Position 9 13) ["Inline add", "Inline add at this use site"]

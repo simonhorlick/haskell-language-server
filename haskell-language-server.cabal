@@ -659,6 +659,7 @@ library hls-inline-function-plugin
     Ide.Plugin.InlineFunction
     Ide.Plugin.InlineFunction.Util
   other-modules:
+    Ide.Plugin.InlineFunction.Dispatch
     Ide.Plugin.InlineFunction.Imports
     Ide.Plugin.InlineFunction.Resolve
     Ide.Plugin.InlineFunction.Rewrite

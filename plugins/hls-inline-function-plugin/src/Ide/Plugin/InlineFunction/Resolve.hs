@@ -3,10 +3,14 @@ module Ide.Plugin.InlineFunction.Resolve
   ( nameUnderCursor
   , findDefinition
   , findAllCallSites
+  , selectClauseSites
+  , clauseRefsFor
   , callSiteAt
   , InlineCandidate(..)
   , BindingDef(..)
+  , ClauseDef(..)
   , CallSite(..)
+  , SiteInline(..)
   , CursorSite(..)
   ) where
 
@@ -41,7 +45,27 @@ data CallSite = CallSite
     -- site.
   , arguments   :: ![RealSrcSpan]
     -- ^ Spans of the arguments.
+  , argExprs    :: ![LHsExpr GhcRn]
+    -- ^ The argument expressions themselves, in the same order as
+    -- 'arguments'; clause selection inspects their shape.
+  , prefixApp   :: !Bool
+    -- ^ Whether the site is a prefix application (or bare reference) of
+    -- the function, as opposed to a backtick call or section. Only
+    -- prefix shapes can host the dispatch rewrite.
+  , inlineVia   :: !SiteInline
+    -- ^ How this site is rewritten. Assigned by 'selectClauseSites';
+    -- 'SiteClause' 0 until then.
   }
+
+-- | How a call site is inlined.
+data SiteInline
+  = SiteClause !Int
+    -- ^ Splice the body of this clause (index into the definition's
+    -- 'clauses'): the clause provably fires at this site.
+  | SiteDispatch
+    -- ^ No single clause is decidable here; splice a case expression
+    -- that keeps the definition's whole dispatch.
+  deriving stock (Eq, Ord)
 
 -- | A resolved candidate for inlining.
 data InlineCandidate = InlineCandidate
@@ -55,22 +79,51 @@ data InlineCandidate = InlineCandidate
 
 -- | The function being inlined.
 data BindingDef = BindingDef
-  { params    :: ![Name]
-    -- ^ Argument names. The list length determines the call-site
-    -- arity to look for; the individual names are currently unused
-    -- but retained for diagnostics.
-  , funIdSpan :: !RealSrcSpan
+  { clauses      :: ![ClauseDef]
+    -- ^ The definition's clauses, in source order (non-empty). At least
+    -- one clause is selectable, or the definition is no candidate.
+  , arity        :: !Int
+    -- ^ Number of parameters; every clause of a 'MatchGroup' has the
+    -- same count. Determines the call-site arity to look for.
+  , dispatchable :: !Bool
+    -- ^ Whether a site where no single clause is decidable may be
+    -- rewritten to a case expression carrying the whole dispatch
+    -- (tier 2): every clause passes 'dispatchOk' and there is at least
+    -- one parameter to scrutinise.
+  , funIdSpan    :: !RealSrcSpan
     -- ^ Span of the @fun_id@ (the function name at its binding site). This
     -- can differ from 'nameSrcSpan' of the bound 'Name' -- for example, a
     -- type class default method's 'Name' is declared by the type signature
     -- in the class header, but the @fun_id@ of the default-method FunBind
     -- is at the implementation site.
-  , bodyRefs  :: ![(RdrName, Name)]
-    -- ^ External names the body (including its where clause) references,
-    -- each paired with the spelling the source text uses -- the spliced
-    -- code keeps that spelling, so a qualified reference needs its
-    -- qualifier in scope at the splice point. Parameters and body-local
-    -- binders are internal names, so they are excluded automatically.
+  }
+
+-- | One clause (one 'Match') of the function being inlined.
+data ClauseDef = ClauseDef
+  { clausePats :: ![LPat GhcRn]
+    -- ^ The clause's parameter patterns, in source order.
+  , selectable :: !Bool
+    -- ^ Whether this clause may be inlined at a call site: its patterns
+    -- are within the rewrite-supported subset ('rewritablePat'), its
+    -- body is a single unguarded right-hand side, and it passes the
+    -- per-clause body checks (no self-reference, no forall'd type
+    -- variable, no record-wildcard construction from a parameter). An
+    -- unselectable clause still takes part in clause selection: a call
+    -- site whose arguments definitely do not match it may skip past it
+    -- to a later clause, but a site it definitely or possibly matches
+    -- cannot be inlined.
+  , dispatchOk :: !Bool
+    -- ^ Whether this clause may travel inside a spliced dispatch (a
+    -- case alternative): no self-reference and no forall'd type
+    -- variable. Patterns, guards and where blocks are copied verbatim
+    -- there, so none of the other 'selectable' restrictions apply.
+  , clauseRefs :: ![(RdrName, Name)]
+    -- ^ External names the clause body (including its where clause)
+    -- references, each paired with the spelling the source text uses --
+    -- the spliced code keeps that spelling, so a qualified reference
+    -- needs its qualifier in scope at the splice point. Parameters and
+    -- body-local binders are internal names, so they are excluded
+    -- automatically.
   }
 
 -- | Where the cursor stood when the candidate was found: on a use of the
@@ -208,12 +261,8 @@ findAllCallSites rn name arity =
               pure site { application = appSp }
         -- backtick infix application: lhs `name` rhs
         OpApp _ lhs op@(L _ (HsVar _ ident)) rhs
-          | hsVarName ident == name -> do
-              appSp  <- location candidate
-              headSp <- location op
-              lhsSp  <- location lhs
-              rhsSp  <- location rhs
-              pure CallSite { application = appSp, headRef = headSp, arguments = [lhsSp, rhsSp] }
+          | hsVarName ident == name ->
+              mkCallSite False candidate op [lhs, rhs]
         -- an operator section -- @(`name` e)@ or @(e `name`)@ -- supplies
         -- one argument; retrie's section rewrites eta-expand the
         -- remaining parameters, so the section inlines to a lambda
@@ -221,21 +270,15 @@ findAllCallSites rn name arity =
         _ | Just (op, operand) <- sectionParts candidate
           , L _ (HsVar _ ident) <- op
           , hsVarName ident == name
-          , arity >= 2 -> do
-              appSp  <- location candidate
-              headSp <- location op
-              operSp <- location operand
-              pure CallSite { application = appSp, headRef = headSp, arguments = [operSp] }
+          , arity >= 2 ->
+              mkCallSite False candidate op [operand]
         _ -> case collectArgs candidate of
           -- a fully-applied call, or a bare 'HsVar' reference (zero args)
           -- that retrie will eta-expand.
           (hd@(L _ (HsVar _ ident)), args)
             | hsVarName ident == name
-            , length args == arity || null args -> do
-                appSp  <- location candidate
-                headSp <- location hd
-                argSps <- traverse location args
-                pure CallSite { application = appSp, headRef = headSp, arguments = argSps }
+            , length args == arity || null args ->
+                mkCallSite True candidate hd args
           -- an infix call that also supplies extra arguments:
           -- @(1 `e` 2) 3@ passes the first two arguments through the
           -- operator and the rest by ordinary application
@@ -243,16 +286,9 @@ findAllCallSites rn name arity =
             | L _ (OpApp _ lhs op@(L _ (HsVar _ ident)) rhs) <- unparen headExpr
             , hsVarName ident == name
             , not (null extras)
-            , 2 + length extras == arity -> do
-                appSp  <- location candidate
-                headSp <- location op
-                argSps <- traverse location (lhs : rhs : extras)
-                pure CallSite { application = appSp, headRef = headSp, arguments = argSps }
+            , 2 + length extras == arity ->
+                mkCallSite False candidate op (lhs : rhs : extras)
           _ -> Nothing
-
-    unparen :: LHsExpr GhcRn -> LHsExpr GhcRn
-    unparen (L _ (HsPar _ inner)) = unparen inner
-    unparen le                    = le
 
     -- A bare reference standing in the operator position of an infix
     -- application or an operator section is not an independent call
@@ -287,6 +323,28 @@ findAllCallSites rn name arity =
           arguments t == arguments s &&
           application t /= application s &&
           application t `containsSpan` application s
+
+-- | Build a 'CallSite' from the whole applied expression, the reference
+-- heading it, and the argument expressions. Clause selection has not run
+-- yet, so the site points at the first clause.
+mkCallSite :: Bool -> LHsExpr GhcRn -> LHsExpr GhcRn -> [LHsExpr GhcRn] -> Maybe CallSite
+mkCallSite prefix whole hd args = do
+  appSp  <- location whole
+  headSp <- location hd
+  argSps <- traverse location args
+  pure
+    CallSite
+      { application = appSp
+      , headRef     = headSp
+      , arguments   = argSps
+      , argExprs    = args
+      , prefixApp   = prefix
+      , inlineVia   = SiteClause 0
+      }
+
+unparen :: LHsExpr GhcRn -> LHsExpr GhcRn
+unparen (L _ (HsPar _ inner)) = unparen inner
+unparen le                    = le
 
 -- | The call site under the cursor. When call sites nest -- @e (e 2)@ --
 -- the innermost one containing the position wins.
@@ -380,12 +438,41 @@ checkBody GRHSs{grhssGRHSs} = do
     GRHS _ [] body -> Just body
     _              -> Nothing
 
--- Allow only simple variable patterns
-checkPattern :: LPat GhcRn -> Maybe Name
-checkPattern pat =
-  case unLoc pat of
-    VarPat _ (L _ n) -> Just n
-    _                -> Nothing
+-- | Patterns the rewrite layer can turn into a retrie query (retrie's
+-- @patToExpr@), restricted further to those whose match is purely
+-- structural -- so a 'PatYes' verdict from 'matchPat' coincides with the
+-- clause's retrie template actually matching the call site. Notably
+-- excluded: as-, bang-, lazy- and view patterns, @n+k@, record-syntax
+-- constructor patterns, and pattern synonyms (whose match semantics are
+-- hidden behind the synonym).
+rewritablePat :: LPat GhcRn -> Bool
+rewritablePat lpat =
+  case unLoc lpat of
+    VarPat{}            -> True
+    WildPat{}           -> True
+    ParPat _ p          -> rewritablePat p
+    TuplePat _ ps Boxed -> all rewritablePat ps
+    ListPat _ ps        -> all rewritablePat ps
+    LitPat{}            -> True
+    NPat{}              -> True
+    ConPat _ lcon details
+      | isDataConName (hsVarName lcon) ->
+          case conSubPats details of
+            Just ps -> all rewritablePat ps
+            Nothing -> False
+    _                   -> False
+
+-- | The sub-patterns of a constructor pattern, in match order; 'Nothing'
+-- for record syntax, whose field order is not the match order.
+conSubPats :: HsConPatDetails GhcRn -> Maybe [LPat GhcRn]
+conSubPats = \case
+#if __GLASGOW_HASKELL__ >= 913
+  PrefixCon ps   -> Just ps
+#else
+  PrefixCon _ ps -> Just ps
+#endif
+  InfixCon p1 p2 -> Just [p1, p2]
+  RecCon{}       -> Nothing
 
 -- Finds uses of 'p'
 findVars :: Data a => Name -> a -> [RealSrcSpan]
@@ -434,35 +521,42 @@ wildcardUsesBinder binders node =
             ]
     usesBinder _ = False
 
--- Check whether this pattern binding has an appropriate form.
-checkMatch
-  :: Name
-  -> RealSrcSpan
-  -> LMatch GhcRn (LHsExpr GhcRn)
-  -> Maybe BindingDef
-checkMatch funName funIdSp (L _ Match{m_pats, m_grhss}) = do
-  -- check each parameter has an appropriate form
-  params <- traverse checkPattern (matchPats m_pats)
-  _ <- checkBody m_grhss
-  -- reject recursive bindings; the whole match is inlined, so a
-  -- self-reference hiding in the where clause counts too
-  guard $ null (findVars funName m_grhss)
-  -- reject matches whose meaning depends on a forall'd type variable
-  -- from the function's own signature -- inlining would capture it.
-  -- the where clause travels with the body, so scan it as well
-  guard $ not (referencesTypeVar m_grhss)
-  -- a record constructed with a wildcard ('R {..}') picks its fields
-  -- up by name; a parameter feeding it disappears under substitution
-  -- (the argument expression replaces the name), so the construction
-  -- cannot survive inlining. Wildcard fields fed by where or let
-  -- binders are fine: those binders travel with the body.
-  guard $ not (wildcardUsesBinder params m_grhss)
-  pure $
-    BindingDef
-      { params    = params
-      , funIdSpan = funIdSp
-      , bodyRefs  = bodyRefSpellings m_grhss
-      }
+-- Check whether one clause of the binding has a form we can inline.
+checkClause :: Name -> LMatch GhcRn (LHsExpr GhcRn) -> ClauseDef
+checkClause funName (L _ Match{m_pats, m_grhss}) =
+  ClauseDef
+    { clausePats = pats
+    , selectable = ok
+    , dispatchOk = dispatch
+    , clauseRefs = bodyRefSpellings m_grhss
+    }
+  where
+    pats    = matchPats m_pats
+    binders = collectPatsBinders CollNoDictBinders pats
+    -- requirements shared by both inline forms:
+    dispatch =
+      -- reject recursive clauses; the whole clause is spliced, so a
+      -- self-reference hiding in the where clause counts too. Other
+      -- clauses may still be inlined by clause selection: a site that
+      -- provably selects a non-recursive clause never expands the
+      -- recursive one.
+      null (findVars funName m_grhss)
+        -- reject clauses whose meaning depends on a forall'd type variable
+        -- from the function's own signature -- inlining would capture it.
+        -- the where clause travels with the body, so scan it as well
+        && not (referencesTypeVar m_grhss)
+    ok =
+      dispatch
+        -- each parameter pattern must be within the rewrite-supported set
+        && all rewritablePat pats
+        -- a single unguarded right-hand side
+        && isJust (checkBody m_grhss)
+        -- a record constructed with a wildcard ('R {..}') picks its fields
+        -- up by name; a pattern binder feeding it disappears under
+        -- substitution (the argument expression replaces the name), so the
+        -- construction cannot survive inlining. Wildcard fields fed by
+        -- where or let binders are fine: those binders travel with the body.
+        && not (wildcardUsesBinder binders m_grhss)
 
 -- | External names the body references, each paired with the spelling
 -- the source uses. A name never seen through a user-written reference
@@ -483,16 +577,205 @@ bodyRefSpellings body =
 checkBinder :: LHsBindLR GhcRn GhcRn -> Maybe BindingDef
 checkBinder b =
   case unLoc b of
-    -- only allow inlining of FunBind-type bindings. extract the matches and
-    -- check there is only one.
+    -- only allow inlining of FunBind-type bindings
     FunBind{fun_id = lFunId, fun_matches = MG{mg_alts = matches}} -> do
       let funName = unLoc lFunId
       funIdSp <- toRealSrcSpan (getLocA lFunId)
-      case unLoc matches of
-        -- ensure we have a single match
-        [match] -> checkMatch funName funIdSp match
-        _       -> Nothing
+      firstAlt : _ <- Just (unLoc matches)
+      let cls    = map (checkClause funName) (unLoc matches)
+          arity' = length (matchPats (m_pats (unLoc firstAlt)))
+          -- an arity-0 dispatch has nothing to scrutinise
+          dispatchable' = arity' > 0 && all (.dispatchOk) cls
+      -- a definition none of whose clauses can ever be inlined -- by
+      -- clause selection or inside a spliced dispatch -- is not a
+      -- candidate at all
+      guard $ any (.selectable) cls || dispatchable'
+      pure
+        BindingDef
+          { clauses      = cls
+          , arity        = arity'
+          , dispatchable = dispatchable'
+          , funIdSpan    = funIdSp
+          }
     _ -> Nothing
+
+-- | Whether an argument expression definitely matches ('PatYes'),
+-- definitely does not match ('PatNo'), or may or may not match
+-- ('PatUnknown') a clause pattern, judged purely syntactically.
+--
+-- Soundness rules:
+--
+-- * A definite verdict must not skip a match that could diverge: both
+--   'PatYes' and 'PatNo' are only answered when deciding the match
+--   forces nothing beyond what the source text already exhibits -- the
+--   pattern binds without looking ('VarPat'-likes), or the argument is
+--   itself a literal or a constructor application, i.e. already in
+--   weak head normal form at the call site.
+-- * An overloaded literal matches via '(==)', so two /different/
+--   literals are 'PatUnknown' -- an unlawful 'Eq' or 'fromInteger'
+--   could still equate them. Equal literals are 'PatYes', assuming a
+--   lawful instance, as every refactoring tool must.
+-- * A 'PatYes' additionally guarantees that retrie's structural match
+--   of the clause's query template succeeds at the site, so the chosen
+--   clause is the one the rewrite actually splices ('rewritablePat'
+--   keeps the two matchers aligned).
+data PatVerdict = PatYes | PatNo | PatUnknown
+  deriving stock Eq
+
+matchPat :: LHsExpr GhcRn -> LPat GhcRn -> PatVerdict
+matchPat lexpr lpat =
+  case unLoc lpat of
+    VarPat{}     -> PatYes
+    WildPat{}    -> PatYes
+    -- an irrefutable pattern always matches
+    LazyPat{}    -> PatYes
+    ParPat _ p   -> matchPat lexpr p
+    -- the bang forces the argument before matching, but a definite
+    -- verdict is only ever reached against a WHNF argument, where the
+    -- bang is a no-op
+    BangPat _ p  -> matchPat lexpr p
+    AsPat _ _ p  -> matchPat lexpr p
+    SigPat _ p _ -> matchPat lexpr p
+    LitPat _ lit ->
+      case unLoc expr' of
+        HsLit _ lit' -> if lit == lit' then PatYes else PatNo
+        _            -> PatUnknown
+    NPat _ (L _ olit) mbNeg _ ->
+      case overLitView expr' of
+        Just (olit', negated)
+          | negated == isJust mbNeg
+          , ol_val olit == ol_val olit' -> PatYes
+        _                               -> PatUnknown
+    TuplePat _ ps Boxed ->
+      case unLoc expr' of
+        ExplicitTuple _ args Boxed
+          | Just es <- traverse presentArg args
+          , length es == length ps ->
+              sequenceMatches (zipWith matchPat es ps)
+        _ -> PatUnknown
+    ListPat _ ps ->
+      case unLoc expr' of
+        ExplicitList _ es
+          | length es == length ps ->
+              sequenceMatches (zipWith matchPat es ps)
+          -- a list literal's spine is fully exposed, so a length
+          -- mismatch is definite
+          | otherwise -> PatNo
+        _ -> PatUnknown
+    ConPat _ lcon details -> matchCon (hsVarName lcon) details
+    _ -> PatUnknown
+  where
+    expr' = unparen lexpr
+
+    matchCon con details
+      -- a pattern synonym's match semantics are hidden behind the
+      -- synonym; no verdict is possible
+      | not (isDataConName con) = PatUnknown
+      | Just (hd, args) <- conAppView expr' =
+          if hd /= con
+            -- both heads are data constructors of the argument's type,
+            -- so differing heads are a definite mismatch
+            then PatNo
+            else case conSubPats details of
+              Just ps | length ps == length args ->
+                sequenceMatches (zipWith matchPat args ps)
+              _ -> PatUnknown
+      | otherwise = PatUnknown
+
+    presentArg = \case
+      Present _ e -> Just e
+      _           -> Nothing
+
+-- | View an expression as a saturated data-constructor application,
+-- prefix or infix.
+conAppView :: LHsExpr GhcRn -> Maybe (Name, [LHsExpr GhcRn])
+conAppView e =
+  case collectArgs (unparen e) of
+    (L _ (HsVar _ ident), args)
+      | let hd = hsVarName ident
+      , isDataConName hd -> Just (hd, args)
+    (L _ (OpApp _ lhs (L _ (HsVar _ ident)) rhs), extras)
+      | let hd = hsVarName ident
+      , isDataConName hd -> Just (hd, lhs : rhs : extras)
+    _ -> Nothing
+
+-- | An overloaded literal argument, together with whether it is negated.
+overLitView :: LHsExpr GhcRn -> Maybe (HsOverLit GhcRn, Bool)
+overLitView e =
+  case unLoc (unparen e) of
+    HsOverLit _ ol -> Just (ol, False)
+    NegApp _ inner _
+      | HsOverLit _ ol <- unLoc (unparen inner) -> Just (ol, True)
+    _ -> Nothing
+
+-- | Combine the per-parameter verdicts of one clause. Patterns match
+-- left to right, so the first non-'PatYes' verdict decides: a definite
+-- mismatch may only be acted on when every pattern before it definitely
+-- matched -- an uncertain match to its left could diverge at runtime
+-- before the mismatch is ever reached.
+sequenceMatches :: [PatVerdict] -> PatVerdict
+sequenceMatches vs =
+  case dropWhile (== PatYes) vs of
+    []    -> PatYes
+    v : _ -> v
+
+-- | Assign each call site the way it is inlined, dropping sites that
+-- cannot be rewritten.
+--
+-- A single selectable clause of plain variable patterns matches any
+-- call, so every site -- including bare references and partial
+-- applications, which supply fewer arguments than the arity -- keeps
+-- its default of clause 0. Otherwise clause selection needs the full
+-- argument list: scanning the clauses top-down, a clause whose patterns
+-- definitely mismatch is skipped; the first clause whose patterns
+-- definitely match is chosen, provided it is selectable. Any
+-- uncertainty -- an undecidable match, or a definitely-firing clause
+-- that is guarded or otherwise unselectable -- falls back to splicing
+-- the whole dispatch as a case expression ('SiteDispatch') when the
+-- definition supports it, and drops the site otherwise. A bare
+-- reference supplies no arguments to decide with, so it can only be
+-- inlined as the dispatch (wrapped in a lambda). Backtick calls and
+-- sections have no dispatch form.
+selectClauseSites :: BindingDef -> [CallSite] -> [CallSite]
+selectClauseSites def sites
+  | [c] <- def.clauses
+  , c.selectable
+  , all isVarPat c.clausePats = sites
+  | otherwise = mapMaybe pick sites
+  where
+    isVarPat p = case unLoc p of
+      VarPat{} -> True
+      _        -> False
+    pick site
+      | length site.argExprs == def.arity =
+          case choose 0 def.clauses of
+            Just i  -> Just site{inlineVia = SiteClause i}
+            Nothing -> dispatchSite
+      | null site.argExprs, def.arity > 0 = dispatchSite
+      | otherwise = Nothing
+      where
+        dispatchSite = do
+          guard (def.dispatchable && site.prefixApp)
+          pure site{inlineVia = SiteDispatch}
+        choose _ [] = Nothing
+        choose i (c : cs) =
+          case sequenceMatches (zipWith matchPat site.argExprs c.clausePats) of
+            PatNo      -> choose (i + 1) cs
+            PatYes     -> if c.selectable then Just i else Nothing
+            PatUnknown -> Nothing
+
+-- | External names referenced by the clauses the given sites inline;
+-- feeds the import check of the target file. A dispatch site splices
+-- every clause, so it references them all.
+clauseRefsFor :: BindingDef -> [CallSite] -> [(RdrName, Name)]
+clauseRefsFor def sites =
+  S.toList . S.fromList $
+    concatMap
+      refsOf
+      (S.toList (S.fromList (map (.inlineVia) sites)))
+  where
+    refsOf (SiteClause ix) = (def.clauses !! ix).clauseRefs
+    refsOf SiteDispatch    = concatMap (.clauseRefs) def.clauses
 
 -- Extract identifiers and their spans from the AST.
 extractNames :: HieAST a -> [(Name, [ContextInfo], RealSrcSpan)]

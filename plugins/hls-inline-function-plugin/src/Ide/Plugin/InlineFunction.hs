@@ -25,7 +25,8 @@ import           Development.IDE.Core.FileStore    (getFileContents)
 import           Development.IDE.Core.RuleTypes    (GetHieAst (..),
                                                     GhcSessionDeps (..),
                                                     TcModuleResult (..),
-                                                    TypeCheck (..))
+                                                    TypeCheck (..),
+                                                    tmrModSummary)
 import           Development.IDE.Core.Shake        (ShakeExtras (withHieDb),
                                                     getShakeExtras)
 import           Development.IDE.GHC.ExactPrint    (GetAnnotatedParsedSource (..))
@@ -59,10 +60,11 @@ import           Ide.Plugin.InlineFunction.Imports (importEdits)
 import           Ide.Plugin.InlineFunction.Resolve (BindingDef (..),
                                                     CursorSite (..),
                                                     InlineCandidate (..),
-                                                    callSiteAt,
+                                                    callSiteAt, clauseRefsFor,
                                                     findAllCallSites,
                                                     findDefinition,
-                                                    nameUnderCursor)
+                                                    nameUnderCursor,
+                                                    selectClauseSites)
 import           Ide.Plugin.InlineFunction.Rewrite (buildEdits, fixityEnvFor)
 import           Ide.Plugin.InlineFunction.Util    (toRealSrcSpan)
 import qualified Ide.Plugin.Resolve                as Resolve
@@ -147,10 +149,17 @@ findCandidate path pos = runMaybeT $ do
   -- single implementation (default or instance) can be spliced into a
   -- call site without changing the program's meaning
   guard $ not (isClassMethod defCheck name)
+  -- a body defined in a QuasiQuotes module may contain a quasi-quote,
+  -- whose syntax only parses where that extension is enabled. We append
+  -- the imports a spliced body needs but cannot enable an extension at
+  -- the target, so splicing such a body would leave the target
+  -- unparseable. Refuse the whole module rather than inspect each body.
+  guard $ not (xopt QuasiQuotes (ms_hspp_opts (tmrModSummary defCheck)))
   -- find the binding in the defining module's renamed source (i.e. once all
   -- 'Name's have been uniquely resolved) and check it can be inlined
   definition <- MaybeT $ pure $ findDefinition (tmrRenamed defCheck) name
-  let sites = findAllCallSites (tmrRenamed check) name (length definition.params)
+  let sites = selectClauseSites definition $
+        findAllCallSites (tmrRenamed check) name definition.arity
   -- omit the candidate entirely when there is nothing to rewrite
   guard $ not (null sites)
   pure
@@ -320,8 +329,8 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities ta
   case maybeInputs of
     Nothing -> pure $ TargetFailed "the module could not be loaded"
     Just (source, check, env, contents) -> do
-      let allSites =
-            findAllCallSites (tmrRenamed check) cand.name (length cand.definition.params)
+      let allSites = selectClauseSites cand.definition $
+            findAllCallSites (tmrRenamed check) cand.name cand.definition.arity
           sites = case scope of
             InlineAll    -> allSites
             InlineSingle -> callSiteAt pos allSites
@@ -351,7 +360,7 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities ta
                      (tmrTypechecked check)
                      source
                      contents
-                     cand.definition.bodyRefs of
+                     (clauseRefsFor cand.definition sites) of
                 -- a binding the spliced body needs cannot be imported
                 -- here; inlining would not compile, so the file must be
                 -- left unchanged

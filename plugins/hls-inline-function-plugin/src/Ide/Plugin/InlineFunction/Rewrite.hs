@@ -18,6 +18,7 @@ import           Control.Exception                     (SomeException)
 import           Control.Monad                         (forM)
 import           Data.Generics                         (everything, mkQ)
 import           Data.List                             (nub)
+import qualified Data.Map                              as M
 import           Data.Maybe                            (fromMaybe, mapMaybe)
 import           Data.Monoid                           (First (..))
 import qualified Data.Set                              as S
@@ -26,9 +27,11 @@ import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Compat.ExactPrint (makeDeltaAst)
 import qualified Development.IDE.GHC.Compat.Util       as Util
 import           Development.IDE.GHC.Error             (realSrcSpanToRange)
+import           Ide.Plugin.InlineFunction.Dispatch    (dispatchRewrites)
 import           Ide.Plugin.InlineFunction.Resolve     (BindingDef (..),
                                                         CallSite (..),
-                                                        InlineCandidate (..))
+                                                        InlineCandidate (..),
+                                                        SiteInline (..))
 import           Ide.Plugin.InlineFunction.Util        (hsVarName)
 import           Language.LSP.Protocol.Types           (TextEdit (..))
 import           Retrie                                (Annotated,
@@ -70,15 +73,47 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
   let defAnnotated    = unsafeMkA (makeDeltaAst defSource) 0
       targetAnnotated = unsafeMkA (makeDeltaAst targetSource) 0
       funIdSpan'      = candidate.definition.funIdSpan
-      siteSpans       = S.fromList (map application candidate.sites)
+      -- which spans each clause may rewrite: clause selection assigned
+      -- every site the clause that fires there ('selectClauseSites')
+      siteSpansByClause =
+        M.fromListWith S.union
+          [ (i, S.singleton s.application)
+          | s <- candidate.sites
+          , SiteClause i <- [s.inlineVia]
+          ]
+      -- the sites where no single clause is decidable; these get the
+      -- dispatch-preserving rewrites instead
+      dispatchSpans =
+        S.fromList
+          [s.application | s <- candidate.sites, SiteDispatch <- [s.inlineVia]]
       -- retrie needs the RenameInfo to cover every module whose source
       -- contributes to the rewrite: the defining module (the template body
       -- keeps its source spans) and the module being rewritten.
       renameInfo      = mkRenameInfo defRn <> mkRenameInfo targetRn
   result <- try @SomeException $ do
-    rewrites <-
-      map (setRewriteTransformer (restrictToSites siteSpans))
-        <$> constructInlineRewrite defAnnotated funIdSpan'
+    (clauseRewrites, dispatchUniverse) <-
+      constructInlineRewrite
+        defAnnotated
+        funIdSpan'
+        (M.keysSet siteSpansByClause)
+        (not (S.null dispatchSpans))
+    -- Each clause's rewrites are restricted to the sites that selected
+    -- that clause. A clause whose query also matches another clause's
+    -- site (a variable-pattern clause subsumes a literal-pattern one)
+    -- refuses it here, and retrie falls through to the next matching
+    -- rewrite -- so the clause that fires at runtime is the one spliced.
+    -- The dispatch rewrites share one span set: the applied form can
+    -- only match a full prefix application and the bare form only a
+    -- lone reference, so they never fire at each other's sites.
+    let rewrites =
+          concat
+            [ map (setRewriteTransformer (restrictToSites spans)) rs
+            | (i, rs) <- zip [0 ..] clauseRewrites
+            , Just spans <- [M.lookup i siteSpansByClause]
+            ]
+            <> map
+                 (setRewriteTransformer (restrictToSites dispatchSpans))
+                 dispatchUniverse
     if null rewrites
       then pure (rewrites, NoChange)
       else do
@@ -107,23 +142,36 @@ restrictToSites sites ctxt match =
     _                                             -> NoMatch
 
 -- | Find the parsed-source 'FunBind' whose @fun_id@ is located at
--- @funIdSpan@ and construct a retrie rewrite for it.
+-- @funIdSpan@ and construct the retrie rewrites for the clauses in
+-- @neededClauses@, in source order (matching the clause indices assigned
+-- by clause selection on the renamed source), plus -- when asked for --
+-- the dispatch-preserving rewrites for sites where no clause is
+-- decidable. Clauses without sites get no rewrites: none would be
+-- applied, and a clause outside the rewrite-supported pattern subset
+-- (an as-pattern, say) has no retrie query form at all.
 constructInlineRewrite
   :: Annotated ParsedSource
   -> RealSrcSpan
-  -> IO [Rewrite Universe]
-constructInlineRewrite annotated funIdSpan =
+  -> S.Set Int
+  -> Bool
+  -> IO ([[Rewrite Universe]], [Rewrite Universe])
+constructInlineRewrite annotated funIdSpan neededClauses needDispatch =
   fmap astA $ transformA annotated $ \(L _ m) -> do
     let First mfb = everything (<>) (First Nothing `mkQ` matcher) m
     case mfb of
       Just (fun_id, fun_matches) -> do
         fe <- mkLocatedHsVar fun_id
-        rewrites <-
-          concat
-            <$> forM (unLoc (mg_alts fun_matches))
-                  (matchToRewrites fe mempty LeftToRight)
-        pure (map toURewrite rewrites)
-      Nothing -> pure []
+        perClause <-
+          forM (zip [0 ..] (unLoc (mg_alts fun_matches))) $ \(i, alt) ->
+            if i `S.member` neededClauses
+              then map toURewrite <$> matchToRewrites fe mempty LeftToRight alt
+              else pure []
+        dispatch <-
+          if needDispatch
+            then map toURewrite <$> dispatchRewrites fun_id fun_matches
+            else pure []
+        pure (perClause, dispatch)
+      Nothing -> pure ([], [])
   where
     matcher
       :: HsBindLR GhcPs GhcPs

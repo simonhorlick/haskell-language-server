@@ -41,6 +41,9 @@ cradle:
       - QualifiedBodyDef
       - QualifiedBodyUse
       - QualifiedScopeUse
+      - QuasiQuoteDef
+      - QuasiQuoteQuoter
+      - QuasiQuoteUse
       - Recursive
       - Section
       - SectionApp
