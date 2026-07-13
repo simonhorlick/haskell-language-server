@@ -5,8 +5,11 @@
 
 module Main ( main ) where
 
+import           Control.Monad                           (void)
+import           Data.List                               (isSuffixOf)
 import           Data.Maybe                              (mapMaybe)
 import qualified Data.Text                               as T
+import           Development.IDE.Test                    (referenceReady)
 import           GHC.Paths                               (libdir)
 import qualified Ide.Plugin.InlineFunction               as InlineFunction
 import           Language.Haskell.GHC.ExactPrint         (exactPrint,
@@ -199,6 +202,18 @@ resolveTests = testGroup "resolve" [
   -- FixityDef.><'s infix 2, so retrie believes the spliced body binds
   -- tighter than && and omits the parentheses the true fixity requires.
   , expectFail $ runTest "Parenthesizes the spliced body using the defining module's operator fixity when a same-named operator is around" "Inline e" "FixityUse" (Position 9 4)
+    -- Found while diagnosing DispatchIndent; same root cause through a
+    -- verbatim body instead of the synthetic dispatch case. exact-print
+    -- resolves a continuation line's DifferentLine delta against its
+    -- layout offset, which class/instance bodies never push (unlike
+    -- where/let/do/case-of, whose re-anchoring makes their content
+    -- self-healing), so a line continuing the graft's own top-level
+    -- expression keeps the column it had at the definition. A body like
+    -- "a\n  + b" spliced into a method of an instance whose declarations
+    -- start in that column puts "+ 2" level with the method, the layout
+    -- rule ends the declaration there, and the module no longer parses
+    -- ("parse error on input +"). (expectFail until fixed.)
+  , runTest "A multi-line body keeps its continuation lines right of an instance method" "Inline combine" "InstanceIndent" (Position 10 9)
   ]
 
 -- | Inlining every use of a function rewrites every project file that uses it,
@@ -266,6 +281,26 @@ serverSyncTest title file pos actionTitle =
     executeCodeAction action
     tc      <- waitForTypecheck doc
     liftIO $ assertBool "server no longer typechecks the document" (either (const False) id tc)
+
+-- | Inline-all from a use site in one module and assert a /second/ module,
+-- rewritten by the same inline-all, still typechecks. The rewrite only
+-- reaches the second module through the hiedb reference index, so the test
+-- opens that module first and waits for ghcide's indexing notification
+-- (like the call-hierarchy plugin's tests) before requesting the action.
+crossModuleSyncTest
+  :: TestName -> FilePath -> Position -> T.Text -> FilePath -> TestTree
+crossModuleSyncTest title fromFile pos actionTitle checkFile =
+  testCase title $ runInlineSession $ do
+    check <- openDoc (checkFile ++ ".hs") "haskell"
+    skipManyTill anyMessage $ void $
+      referenceReady ((checkFile ++ ".hs") `isSuffixOf`)
+    from    <- openDoc (fromFile ++ ".hs") "haskell"
+    _       <- waitForBuildQueue
+    actions <- getCodeActions from (L.Range pos pos)
+    action  <- pickAction actionTitle actions
+    executeCodeAction action
+    tc      <- waitForTypecheck check
+    liftIO $ assertBool "the other module no longer typechecks" (either (const False) id tc)
 
 -- | Regression tests for bugs found by running the inline-function-soak
 -- executable over the HLS codebase itself. Each stays 'expectFail' until
@@ -377,7 +412,7 @@ soakRegressionTests = testGroup "soak regressions" [
     -- (the where-turned-let's second equation) are indented from the original
     -- pre-shift column -- so the two 'f' equations land one column apart and
     -- the layout no longer parses ("parse error on input f").
-  , expectFail $ serverSyncTest "A capture rename beside the splice keeps a multi-equation where-let aligned" "WhereMultiEqn" (Position 10 0) "Inline partitionNodeResults"
+  , serverSyncTest "A capture rename beside the splice keeps a multi-equation where-let aligned" "WhereMultiEqn" (Position 10 0) "Inline partitionNodeResults"
     -- Found on ghcide's Session.hs (retryOnSqliteBusy): the inlined body is a
     -- 'let ... in ...' expression. When the call site is a statement in a do
     -- block, the body is spliced at the do-statement column, where its 'let'
@@ -386,7 +421,208 @@ soakRegressionTests = testGroup "soak regressions" [
     -- longer parses ("parse error on input in"). The spliced 'let ... in' must
     -- be indented past the do-statement column (or parenthesized) to stay one
     -- expression.
-  , expectFail $ serverSyncTest "A let-in body is inlined correctly into a do-block statement" "DoBlockLetIn" (Position 3 0) "Inline retryBusy"
+  , serverSyncTest "A let-in body is inlined correctly into a do-block statement" "DoBlockLetIn" (Position 12 2) "Inline e"
+    -- Found on retrie's PatternMap/Bag.hs (mMatch): 'mapFor f (hs, m)' has
+    -- a tuple-pattern parameter, so a call passing a non-tuple argument
+    -- cannot decide the clause syntactically and inlines as a
+    -- tuple-scrutinee dispatch, @case (q0, q1) of (f, (hs, m)) -> ...@.
+    -- 'Dispatch.clauseToAlt' fixes the alternative's indent with
+    -- 'DifferentLine 1 2', which does not track where the case is grafted:
+    -- inside an instance method (whose equation already sits in column 2)
+    -- the alternative lands in column 2 too, level with the method's own
+    -- declaration, so it parses as a new binding and the module no longer
+    -- typechecks ("Parse error in pattern: f"). The correct indent depends
+    -- on the splice column, which the rewrite cannot know when it is built.
+    -- (expectFail until fixed.)
+  , serverSyncTest "A tuple-dispatch case stays indented below an instance method" "DispatchIndent" (Position 9 10) "Inline mapFor"
+    -- Found on ghcide-bench's runBenchmarksFun (Experiments.hs): 'runBench
+    -- runSess Bench{..}' uses 'name' from its RecordWildCards parameter, and
+    -- it is called inside '\b@Bench{name} -> ... runBench run b'. A
+    -- non-record argument makes the call inline as a tuple dispatch
+    -- '@case (run, b) of (runSess, Bench{..}) -> ... name ...@'. retrie's
+    -- capture analysis used to miss that the dispatch's own 'Bench{..}'
+    -- binds 'name' (its scope lookup correlated whole binding nodes, and
+    -- the synthesized tuple pattern failed the correlation), so it treated
+    -- the spliced body's 'name' as free and renamed the outer binder to
+    -- avoid capture -- but 'Bench{name}' is a field pun, and the rename
+    -- rewrote it to the invalid 'Bench{name1}' (field 'name1' does not
+    -- exist). Fixed by resolving binders per pattern node by exact span
+    -- (retrie's riPatBinders): the original patterns inside the
+    -- synthesized tuple resolve individually, wildcard binders included,
+    -- so no capture is detected and no rename is planned.
+  , serverSyncTest "A capture rename expands a NamedFieldPuns binder instead of renaming the field" "PunCapture" (Position 20 27) "Inline runBench"
+    -- Found on ghcide-bench's searchSymbol use (Experiments.hs): the same
+    -- implicit-wildcard-binder blind spot through a construction instead of
+    -- a pattern. The inlined body binds 'doc' with its own RecordWildCards
+    -- parameter; retrie treated the spliced 'doc' as free and renamed the
+    -- outer 'doc' to avoid capture. That outer 'doc' feeds a 'Rec{..}'
+    -- construction, which reads its 'doc' field from a variable spelled
+    -- 'doc', so the rename left the field unsupplied ("Constructor 'Rec'
+    -- does not have the required strict field(s) doc"). Fixed by the same
+    -- per-pattern binder resolution as PunCapture above.
+  , serverSyncTest "A capture rename does not break a RecordWildCards construction that reads the renamed name" "WildcardConstruct" (Position 25 14) "Inline combine"
+    -- Constructed from the PunCapture analysis (not soak-found): a genuine
+    -- capture. The inlined body references the top-level field selector
+    -- 'name', and the call site binds 'name' as a NamedFieldPuns pun,
+    -- shadowing the selector -- so the spliced reference must not be left
+    -- bare. Two retrie defects used to stack up here: its rename index
+    -- only recorded HsVar occurrences (a selector occurrence is an XExpr
+    -- HsRecSelRn node in the renamed AST), so the capture went entirely
+    -- undetected and the graft silently rebound 'name b' to the pun
+    -- binder -- an 'Int' applied to an argument, a *deferred* type error
+    -- in the IDE session, invisible to 'serverSyncTest' (waitForTypecheck
+    -- reports success); hence a golden test. And executing the rename
+    -- would have patched the occurrence span, which for a pun is the
+    -- field label (yielding the invalid 'Bench{name1}'). Fixed by
+    -- indexing selector occurrences and expanding a renamed pun to
+    -- 'Bench{name = name1}' (retrie's captureRenames/renameOccurrences).
+  , runTest "A captured field-selector reference renames and expands the enclosing pun binder" "Inline total" "PunSelectorCapture" (Position 16 25)
+    -- The same capture through a RecordWildCards binder instead of a pun
+    -- (not soak-found). The capturing binder's binding occurrence is the
+    -- '..' token itself, which offers no identifier to patch in place, so
+    -- the capture-avoiding rename expands the wildcard: the renamed
+    -- binder is pulled out into an explicit field, 'Bench{name = name1,
+    -- ..}', and the '..' is kept for whatever else it binds (retrie's
+    -- captureRenames/renameOccurrences, mirroring what expandWildcardPat
+    -- does for template-side renames). A wrong outcome either splices
+    -- with the capture (no detection) or renames the uses but not the
+    -- '..' binding, leaving them out of scope; both fail the comparison.
+  , runTest "A capture by a RecordWildCards pattern binder expands the wildcard when renaming" "Inline total" "WildcardSelectorCapture" (Position 16 23)
+    -- The same expansion on the construction side: the renamed binder is
+    -- read implicitly by a 'Rec{..}' record construction elsewhere in its
+    -- scope, so the construction gains an explicit 'doc = doc1' field.
+  , runTest "A capture rename expands a wildcard construction that reads the renamed binder" "Inline f" "WildcardConstructCapture" (Position 15 18)
+    -- ...but when the implicit occurrence sits inside the call's own
+    -- argument ('f Rec{..}'), the application-form rewrite cannot rename
+    -- it: argument text is re-printed as part of the graft
+    -- (renameSubstOccurrences rewrites variable nodes by resolved Name,
+    -- and an implicit wildcard read has none), and the span-keyed
+    -- expansion only patches occurrences outside the match span. retrie
+    -- refuses that match (replaceImpl's renameReachesAll); the
+    -- bare-reference rewrite then matches just 'f', the argument stays in
+    -- place at its own span, and the expansion repairs it there. Without
+    -- the refusal the application form would win and re-print the
+    -- argument's 'Rec{..}' unexpanded, reading a variable that no longer
+    -- exists.
+  , runTest "A capture whose wildcard occurrence is inside the call argument falls back to a lambda" "Inline f" "WildcardArgCapture" (Position 18 8)
+    -- Found on ghcide's mkHiFileResult (Compile.hs -> GHC.Util's
+    -- fingerprintToBS, and Session.hs's writeTaskQueue): the inlined function
+    -- matches its argument with a constructor pattern ('Fingerprint a b',
+    -- 'TaskQueue q'), so a non-literal argument inlines as a dispatch
+    -- '@case arg of Wrapped n -> ...@' that puts the constructor bare in the
+    -- pattern. The defining module has that constructor in scope unqualified,
+    -- but the target has it only through a qualified import ('Util.Fingerprint',
+    -- 'Q.Wrapped'), so the bare dispatch pattern would not resolve ("Not in
+    -- scope: data constructor Wrapped"). Clause patterns now contribute their
+    -- references when a site dispatches, so the import check appends an
+    -- import supplying the constructor through its parent type -- pinned
+    -- exactly by the golden variant.
+  , serverSyncTest "A dispatch on a constructor in scope only qualified at the target brings it into scope" "QualifiedCtorUse" (Position 14 10) "Inline unwrap"
+  , runTest "A dispatch constructor is imported through its parent type" "Inline unwrap" "QualifiedCtorUse" (Position 14 10)
+    -- Found on hls-graph's shakeNewDatabase (Database.hs -> Internal's
+    -- newDatabase): the body constructs a record with a RecordWildCards
+    -- wildcard ('Database{..}'), which parses only because the defining module
+    -- enables the extension. The wildcard fields come from the parameters, so
+    -- the plugin inlines the call as a dispatch that keeps the parameter names
+    -- bound and the '{..}' intact -- but it splices the construction into the
+    -- target, which does not enable RecordWildCards. The plugin appends the
+    -- import the body needs but cannot add the language extension the spliced
+    -- syntax requires, so the module would no longer typecheck ("Illegal `..'
+    -- in record construction"). Same shape as the QuasiQuotes case, through an
+    -- extension the target lacks rather than a quasi-quoter -- but where a
+    -- QuasiQuotes module is refused wholesale, RecordWildCards is common
+    -- enough that only definitions actually carrying a wildcard are refused:
+    -- no action is offered on 'mk', while the wildcard-free 'mkPlain' from
+    -- the same module still inlines.
+  , runActionTest "A RecordWildCards body is not inlined into a module that lacks the extension" "WildcardExtUse" (Position 12 12) []
+  , serverSyncTest "A wildcard-free body from a RecordWildCards module still inlines without the extension" "WildcardExtUse" (Position 17 12) "Inline mkPlain"
+    -- Found on ghcide's getParsedModuleRule (Rules.hs): the inlined body's
+    -- first line is a '--' line comment before the expression. Grafting the
+    -- body transferred the call site's entry delta onto the expression node,
+    -- but exact-print applies that entry after the node's prior comments, so
+    -- the expression was pulled onto the comment line and commented out
+    -- ('-- ... have it' + 'define ...' became '-- ... have itdefine ...') and
+    -- the module no longer parsed. Fixed by landing the transferred entry on
+    -- the first prior comment instead (retrie's addAllAnnsT); the golden
+    -- variant pins the layout: the comment takes the call site's spacing and
+    -- the body keeps its newline.
+  , serverSyncTest "A leading line comment on the body keeps its newline when spliced" "CommentBody" (Position 9 4) "Inline e"
+  , runTest "A leading line comment on the body keeps its newline when spliced (layout)" "Inline e" "CommentBody" (Position 9 4)
+    -- Found on hls-cabal-plugin's licenseErrorAction/fieldErrorName use
+    -- (Cabal.hs): the inlined body reads a record field selector ('_message')
+    -- in scope at the target through an imported record -- but the target has
+    -- a second record with the same field, so the spliced bare selector would
+    -- be ambiguous ("Ambiguous occurrence _message"). The guard used to miss
+    -- it: the selector's spelling reached the import check synthesized from
+    -- its 'Name', whose 'OccName' sits in a per-record field namespace that
+    -- resolves only against that record's fields. The written spelling (a
+    -- plain variable, collected from 'HsRecSelRn' by 'refSpellings') resolves
+    -- against every field in scope, so the second field now surfaces and the
+    -- target is refused like AmbigTwoUse.
+  , serverSyncTest "An already-in-scope field selector in the body does not become ambiguous at the target" "FieldAmbigUse" (Position 15 10) "Inline getMsg"
+    -- ...while a selector that resolves uniquely at the target passes the
+    -- same guard and still inlines: refusal keys on the second candidate,
+    -- not on the reference being a field selector. Golden rather than
+    -- server-synced so a wrongly refused (hence unchanged, still
+    -- typechecking) document cannot pass.
+  , runTest "A uniquely-resolving field selector in the body still inlines" "Inline getUnique" "FieldAmbigUse" (Position 20 14)
+    -- Found across ghcide's Compat.Env wrappers (hscSetFlags, hscSetHooks,
+    -- hscSetUnitEnv, initTempFs): the body updates a record through a
+    -- *qualified* field name ('env { Env.hsc_dflags = df }'), and the target
+    -- has the field in scope only under a different qualifier (or
+    -- unqualified), so the spliced 'Env.hsc_dflags' would not resolve ("Not
+    -- in scope: record field 'Env.hsc_dflags'"). Field labels of record
+    -- constructions, updates and constructor patterns now reach the import
+    -- check with the spelling the source wrote, so the unresolvable
+    -- qualified label refuses the target (fields cannot be imported).
+  , serverSyncTest "A qualified record-field update is not inlined where the qualifier is absent" "QualifiedFieldUse" (Position 13 10) "Inline setVal"
+    -- Found on ghcide's completion 'go' and hls-cabal-plugin's
+    -- listFileCompletions: the body is a '\case' lambda, which parses only
+    -- under LambdaCase. Splicing it into a target that lacks the extension
+    -- would not parse ("Illegal \case"), and like QuasiQuotes/RecordWildCards
+    -- the plugin cannot enable the extension -- so no action is offered,
+    -- while the '\case'-free 'plainShow' from the same module still inlines.
+  , runActionTest "A LambdaCase body is not inlined into a module that lacks the extension" "LambdaCaseUse" (Position 11 10) []
+  , serverSyncTest "A LambdaCase-free body from a LambdaCase module still inlines without the extension" "LambdaCaseUse" (Position 16 10) "Inline plainShow"
+    -- Found on ghcide's getCompletionPrefixFromRope: the body is a multi-way
+    -- 'if', which parses only under MultiWayIf; splicing it into a target
+    -- lacking the extension would not parse ("Illegal multi-way
+    -- if-expression"), so no action is offered.
+  , runActionTest "A MultiWayIf body is not inlined into a module that lacks the extension" "MultiWayIfUse" (Position 9 10) []
+    -- Found on hls-cabal-plugin's moduleOutline and change-type-signature's
+    -- stripSignature: a clause parameter is a view pattern, which parses only
+    -- under ViewPatterns. A non-literal argument would dispatch, copying the
+    -- view pattern into a case alternative spliced at the target, which lacks
+    -- the extension ("Illegal view pattern") -- so no action is offered.
+  , runActionTest "A view-pattern clause is not dispatched into a module that lacks the extension" "ViewPatternUse" (Position 10 11) []
+    -- Found on hls-test-utils' standardizeQuotes: the body is a "hanging"
+    -- 'let' -- the keyword at the end of the equation's first line, the
+    -- bindings and a dedented 'in' left of it -- so its column deltas are
+    -- negative relative to the keyword. Grafting it at a column left of the
+    -- original underflowed those deltas, printing the bindings at column
+    -- zero ("parse error"). retrie now re-lays hanging lets canonically
+    -- (first binding beside the keyword, 'in' below it), which is valid at
+    -- any column; the golden variant pins that layout.
+  , serverSyncTest "A multi-line let body keeps its layout when spliced into an equation" "MultiLineLetBody" (Position 15 10) "Inline standardize"
+  , runTest "A hanging let body re-lays canonically when spliced (layout)" "Inline standardize" "MultiLineLetBody" (Position 15 10)
+    -- Found on hls-cabal-plugin's cabalPositionToLSPPosition (Position): the
+    -- spliced body needs a data constructor not in scope at the target, so
+    -- the plugin imports it through its parent type ('import M (Name(Name))').
+    -- But that import also brings the *type* 'Name' into scope, so a
+    -- same-named type already imported would turn existing references
+    -- ambiguous ("Ambiguous occurrence 'Name'"). The import item is now
+    -- refused when the parent's spelling already means something else at
+    -- the target, leaving the file unchanged.
+  , serverSyncTest "A parent-type import for a spliced constructor does not make an existing type ambiguous" "CtorParentUse" (Position 17 10) "Inline mk"
+    -- Found on hls-plugin-api's configForPlugin and ghcide's showPosition:
+    -- the extension guard used to check only the *requesting* module, so an
+    -- inline-all invoked from a RecordWildCards module dispatched a 'P{..}'
+    -- pattern into a second module that lacks the extension ("Illegal `..'
+    -- in record pattern"). 'rewriteTarget' now re-checks each rewritten
+    -- module and leaves an unspliceable one unchanged (with a warning). The
+    -- rewrite reaches the second module through the hiedb reference index,
+    -- so the test waits for that module to be indexed first.
+  , crossModuleSyncTest "A RecordWildCards dispatch is not inlined into a second module that lacks the extension" "WildcardPatHave" (Position 15 13) "Inline addP" "WildcardPatLack"
   ]
 
 -- | A target file that cannot be rewritten is reported in a warning

@@ -7,7 +7,7 @@ e x
 
 f :: String
 f = case 6 of
-      x
-        | x > 0 -> "Positive"
-        | otherwise -> "Negative or Zero"
+  x
+    | x > 0 -> "Positive"
+    | otherwise -> "Negative or Zero"
 

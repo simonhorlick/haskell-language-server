@@ -6,5 +6,5 @@ e n = n
 
 a :: [Int]
 a = map (\ x -> case x of
-          0 -> 1
-          n -> n) [1, 2]
+  0 -> 1
+  n -> n) [1, 2]

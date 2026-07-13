@@ -6,5 +6,5 @@ e x y = x * y
 
 a :: Int -> Int
 a k = case (k, 2) of
-        (0, y) -> y
-        (x, y) -> x * y
+  (0, y) -> y
+  (x, y) -> x * y

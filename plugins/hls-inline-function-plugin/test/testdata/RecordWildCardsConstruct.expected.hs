@@ -9,4 +9,4 @@ mk a b = R {..}
 
 f :: R
 f = case (1, 2) of
-      (a, b) -> R {..}
+  (a, b) -> R {..}

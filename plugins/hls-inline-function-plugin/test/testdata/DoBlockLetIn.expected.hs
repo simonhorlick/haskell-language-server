@@ -10,4 +10,5 @@ f = do
   putStrLn "hi"
   -- splicing a bare let..in statement into a do block would cause
   -- a parse error on the "in", so we wrap the expression in parenthesis
-  e 5
+  (let y = 5
+   in pure y)

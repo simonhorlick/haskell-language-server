@@ -7,8 +7,11 @@
 -- rewrite from the function being inlined and hand it to retrie's public
 -- 'applyWithRenameInfo', supplying a 'RenameInfo' derived from the renamed
 -- source (so capture-avoiding substitution and @RecordWildCards@ binders
--- are handled by retrie). The resulting 'Change' is turned into LSP
--- 'TextEdit's.
+-- are handled by retrie). Retrie returns the fully rewritten module -- with
+-- its capture-avoiding renames folded into the AST -- which we exact-print
+-- and diff against the original print to produce LSP 'TextEdit's, letting
+-- exact-print lay out multi-line grafts rather than reassembling them from
+-- replacement fragments.
 module Ide.Plugin.InlineFunction.Rewrite
   ( buildEdits
   , fixityEnvFor
@@ -17,23 +20,22 @@ module Ide.Plugin.InlineFunction.Rewrite
 import           Control.Exception                     (SomeException)
 import           Control.Monad                         (forM)
 import           Data.Generics                         (everything, mkQ)
-import           Data.List                             (nub)
 import qualified Data.Map                              as M
-import           Data.Maybe                            (fromMaybe, mapMaybe)
+import           Data.Maybe                            (fromMaybe)
 import           Data.Monoid                           (First (..))
 import qualified Data.Set                              as S
 import qualified Data.Text                             as T
 import           Development.IDE.GHC.Compat
 import           Development.IDE.GHC.Compat.ExactPrint (makeDeltaAst)
 import qualified Development.IDE.GHC.Compat.Util       as Util
-import           Development.IDE.GHC.Error             (realSrcSpanToRange)
 import           Ide.Plugin.InlineFunction.Dispatch    (dispatchRewrites)
 import           Ide.Plugin.InlineFunction.Resolve     (BindingDef (..),
                                                         CallSite (..),
                                                         InlineCandidate (..),
                                                         SiteInline (..))
 import           Ide.Plugin.InlineFunction.Util        (hsVarName)
-import           Language.LSP.Protocol.Types           (TextEdit (..))
+import           Ide.PluginUtils                       (makeDiffTextEdit)
+import           Language.LSP.Protocol.Types           (TextEdit)
 import           Retrie                                (Annotated,
                                                         Context (ctxtMatchSpan),
                                                         MatchResult (NoMatch),
@@ -42,13 +44,11 @@ import           Retrie                                (Annotated,
                                                         astA, mkRenameInfo,
                                                         setRewriteTransformer,
                                                         toURewrite, transformA)
-import           Retrie.CPP                            (CPP (NoCPP))
-import           Retrie.ExactPrint.Annotated           (unsafeMkA)
+import           Retrie.CPP                            (CPP (NoCPP), printCPP)
+import           Retrie.ExactPrint.Annotated           (printA, unsafeMkA)
 import           Retrie.Expr                           (mkLocatedHsVar)
 import           Retrie.Fixity                         (FixityEnv, mkFixityEnv)
 import           Retrie.Monad                          (runRetrie)
-import           Retrie.Replace                        (Change (..),
-                                                        Replacement (..))
 import           Retrie.Rewrites.Function              (matchToRewrites)
 import           Retrie.Types                          (Direction (LeftToRight),
                                                         Rewrite)
@@ -115,18 +115,26 @@ buildEdits fixities (defSource, defRn) (targetSource, targetRn) candidate = do
                  (setRewriteTransformer (restrictToSites dispatchSpans))
                  dispatchUniverse
     if null rewrites
-      then pure (rewrites, NoChange)
+      then pure (rewrites, [])
       else do
-        (_, _, change) <-
+        (_, rewritten, _change) <-
           runRetrie
             fixities
             (applyWithRenameInfo renameInfo rewrites)
             (NoCPP targetAnnotated)
-        pure (rewrites, change)
+        -- Diff the whole module printed before and after the rewrite, both
+        -- through retrie's exact printer, so only genuine changes surface
+        -- as edits and multi-line grafts are laid out by exact-print rather
+        -- than reassembled from column-zero replacement fragments. Retrie
+        -- folds its capture-avoiding renames into the returned AST (see
+        -- 'Retrie.Replace.renameOccurrences'), so the reprint is complete.
+        let before = T.pack (printA targetAnnotated)
+            after  = T.pack (printCPP [] rewritten)
+        pure (rewrites, makeDiffTextEdit before after)
   pure $ case result of
-    Left err          -> Left ("retrie failed: " <> show err)
-    Right ([], _)     -> Left "no rewrites produced for the function"
-    Right (_, change) -> Right (changeToTextEdits change)
+    Left err         -> Left ("retrie failed: " <> show err)
+    Right ([], _)    -> Left "no rewrites produced for the function"
+    Right (_, edits) -> Right edits
 
 -- | Refuse any match that does not occur at one of the candidate's call
 -- sites. Site policy thereby lives inside the engine, next to match
@@ -180,39 +188,6 @@ constructInlineRewrite annotated funIdSpan neededClauses needDispatch =
       | RealSrcSpan sp _ <- getLocA fun_id, sp == funIdSpan =
           First (Just (fun_id, fun_matches))
     matcher _ = First Nothing
-
--- | Retrie prints a replacement fragment relative to column zero, but a
--- 'TextEdit' splices it verbatim at the replaced span's start column.
--- Shift continuation lines by that column so the fragment keeps its
--- internal layout at the splice point -- a do-block body inserted
--- flush-left would otherwise close the enclosing block's layout context.
-indented :: RealSrcSpan -> String -> T.Text
-indented sp repl =
-  case T.splitOn "\n" (T.pack repl) of
-    []           -> ""
-    first : rest -> T.intercalate "\n" (first : map indent rest)
-  where
-    col = srcSpanStartCol sp - 1
-    indent l
-      | T.null l  = l
-      | otherwise = T.replicate col " " <> l
-
--- | Convert retrie's 'Replacement's to 'TextEdit's. Matching is already
--- restricted to the candidate's call sites (see 'restrictToSites'), so
--- every replacement belongs to the edit: the grafts at the sites plus
--- the capture-avoiding renames their grafts required (whose spans lie
--- elsewhere in the file -- the renamed binder's occurrences).
-changeToTextEdits :: Change -> [TextEdit]
-changeToTextEdits NoChange = []
-changeToTextEdits (Change reps _) =
-  -- a rename needed by several sites arrives once per originating site;
-  -- collapse the identical copies so the edit has no overlapping ranges
-  nub $ mapMaybe toEdit reps
-  where
-    toEdit Replacement{replLocation, replReplacement}
-      | RealSrcSpan sp _ <- replLocation =
-          Just (TextEdit (realSrcSpanToRange sp) (indented sp replReplacement))
-      | otherwise = Nothing
 
 -- | Build the in-scope fixity environment that retrie needs to
 -- parenthesize substituted operator expressions correctly.

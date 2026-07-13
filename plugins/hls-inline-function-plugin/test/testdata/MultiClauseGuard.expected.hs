@@ -11,7 +11,7 @@ a = 1
 
 b :: Int
 b = case False of
-      True -> 1
-      x
-        | x -> 2
-        | otherwise -> 3
+  True -> 1
+  x
+    | x -> 2
+    | otherwise -> 3

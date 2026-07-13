@@ -158,6 +158,15 @@ findCandidate path pos = runMaybeT $ do
   -- find the binding in the defining module's renamed source (i.e. once all
   -- 'Name's have been uniquely resolved) and check it can be inlined
   definition <- MaybeT $ pure $ findDefinition (tmrRenamed defCheck) name
+  -- extension-gated syntax in the definition (a '..' wildcard, a \case,
+  -- a multi-way if, a view pattern) travels with the splice intact and
+  -- only parses where its extension is on. Like QuasiQuotes we cannot
+  -- enable extensions at the target, but these are common enough that
+  -- refusing every body from such a module would be too blunt: refuse
+  -- only definitions that actually carry the syntax, and only where the
+  -- module lacks the extension. This guards the requesting module; each
+  -- further rewrite target is checked the same way in 'rewriteTarget'.
+  guard $ spliceableInto definition (tmrModSummary check)
   let sites = selectClauseSites definition $
         findAllCallSites (tmrRenamed check) name definition.arity
   -- omit the candidate entirely when there is nothing to rewrite
@@ -171,6 +180,14 @@ findCandidate path pos = runMaybeT $ do
     , defPath
     , site
     )
+
+-- | Whether a module compiled with the given summary parses every
+-- extension-gated syntax form the definition's splice carries. The
+-- plugin can append imports at a target but not language pragmas, so a
+-- module failing this check must not be rewritten.
+spliceableInto :: BindingDef -> ModSummary -> Bool
+spliceableInto definition ms =
+  all (\ext -> xopt ext (ms_hspp_opts ms)) definition.neededExts
 
 -- | True when @name@ is a type class method, per the defining module's
 -- type environment. Covers both default methods and instance methods: a
@@ -336,6 +353,13 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities ta
             InlineSingle -> callSiteAt pos allSites
       if null sites
         then pure TargetSkipped
+        -- the requesting module was vetted when the action was offered
+        -- ('findCandidate'), but inline-all reaches further modules whose
+        -- extension sets differ; a target that cannot parse the spliced
+        -- syntax must be left unchanged
+        else if not (spliceableInto cand.definition (tmrModSummary check))
+          then pure $ TargetNotRewritable
+            "the inlined code needs a language extension this module does not enable"
         else do
           -- operators spliced in with the body come from the defining
           -- module, the ones around the call site from the target

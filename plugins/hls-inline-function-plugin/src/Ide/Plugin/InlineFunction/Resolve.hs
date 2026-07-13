@@ -17,7 +17,7 @@ module Ide.Plugin.InlineFunction.Resolve
 import           Control.Monad                  (guard)
 import           Data.Generics                  (Data, everything, extQ,
                                                  listify, mkQ)
-import           Data.List                      (sortOn)
+import           Data.List                      (nub, sortOn)
 import qualified Data.Map                       as M
 import           Data.Maybe                     (isJust, listToMaybe, mapMaybe)
 import qualified Data.Set                       as S
@@ -96,6 +96,13 @@ data BindingDef = BindingDef
     -- type class default method's 'Name' is declared by the type signature
     -- in the class header, but the @fun_id@ of the default-method FunBind
     -- is at the implementation site.
+  , neededExts   :: ![Extension]
+    -- ^ Language extensions the definition's syntax needs wherever it is
+    -- spliced: a @..@ record wildcard, a @\\case@ lambda, a multi-way
+    -- @if@, a view pattern. The splice carries the syntax verbatim
+    -- (bodies always, patterns inside a dispatch), and it only parses
+    -- where the extension is on -- which the plugin cannot enable at a
+    -- target module.
   }
 
 -- | One clause (one 'Match') of the function being inlined.
@@ -124,6 +131,12 @@ data ClauseDef = ClauseDef
     -- needs its qualifier in scope at the splice point. Parameters and
     -- body-local binders are internal names, so they are excluded
     -- automatically.
+  , patRefs    :: ![(RdrName, Name)]
+    -- ^ External names the clause's parameter patterns reference --
+    -- data constructors, mostly. A clause splice consumes the patterns
+    -- by matching, but a dispatch copies them verbatim into its case
+    -- alternative, so there they need to resolve at the target like
+    -- body references do.
   }
 
 -- | Where the cursor stood when the candidate was found: on a use of the
@@ -521,6 +534,30 @@ wildcardUsesBinder binders node =
             ]
     usesBinder _ = False
 
+-- | The language extensions the node's syntax needs wherever it is
+-- printed: a @..@ record wildcard in a construction or constructor
+-- pattern (the renamer keeps the 'rec_dotdot' marker alongside the
+-- fields it expanded to, so the check is purely on that marker), a
+-- @\\case@ or @\\cases@ lambda, a multi-way @if@, and a view pattern.
+-- These are the extension-gated syntax forms observed in real
+-- definitions so far; the list errs on the side of growing.
+spliceExtensions :: Data a => a -> [Extension]
+spliceExtensions = nub . everything (++) ([] `mkQ` exprExts `extQ` patExts)
+  where
+    exprExts :: HsExpr GhcRn -> [Extension]
+    exprExts (RecordCon _ _ HsRecFields{rec_dotdot})
+      | isJust rec_dotdot       = [RecordWildCards]
+    exprExts (HsLam _ LamCase _)  = [LambdaCase]
+    exprExts (HsLam _ LamCases _) = [LambdaCase]
+    exprExts HsMultiIf{}          = [MultiWayIf]
+    exprExts _                    = []
+
+    patExts :: Pat GhcRn -> [Extension]
+    patExts (ConPat _ _ (RecCon HsRecFields{rec_dotdot}))
+      | isJust rec_dotdot = [RecordWildCards]
+    patExts ViewPat{}     = [ViewPatterns]
+    patExts _             = []
+
 -- Check whether one clause of the binding has a form we can inline.
 checkClause :: Name -> LMatch GhcRn (LHsExpr GhcRn) -> ClauseDef
 checkClause funName (L _ Match{m_pats, m_grhss}) =
@@ -529,6 +566,7 @@ checkClause funName (L _ Match{m_pats, m_grhss}) =
     , selectable = ok
     , dispatchOk = dispatch
     , clauseRefs = bodyRefSpellings m_grhss
+    , patRefs    = bodyRefSpellings pats
     }
   where
     pats    = matchPats m_pats
@@ -596,6 +634,7 @@ checkBinder b =
           , arity        = arity'
           , dispatchable = dispatchable'
           , funIdSpan    = funIdSp
+          , neededExts   = spliceExtensions matches
           }
     _ -> Nothing
 
@@ -775,7 +814,10 @@ clauseRefsFor def sites =
       (S.toList (S.fromList (map (.inlineVia) sites)))
   where
     refsOf (SiteClause ix) = (def.clauses !! ix).clauseRefs
-    refsOf SiteDispatch    = concatMap (.clauseRefs) def.clauses
+    -- a dispatch copies every clause's parameter patterns into its case
+    -- alternatives, so their references splice along with the bodies
+    refsOf SiteDispatch    =
+      concatMap (\c -> c.clauseRefs <> c.patRefs) def.clauses
 
 -- Extract identifiers and their spans from the AST.
 extractNames :: HieAST a -> [(Name, [ContextInfo], RealSrcSpan)]

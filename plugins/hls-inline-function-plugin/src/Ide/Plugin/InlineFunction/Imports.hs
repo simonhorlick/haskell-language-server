@@ -13,6 +13,7 @@ module Ide.Plugin.InlineFunction.Imports
   ( importEdits
   ) where
 
+import           Control.Monad                     (guard)
 import           Data.List                         (intercalate, sort)
 import qualified Data.Map                          as M
 import           Data.Maybe                        (isJust, isNothing)
@@ -54,12 +55,7 @@ importEdits defTc targetTc targetSource targetContents needs
       S.toList . S.fromList $
         filter (isJust . lookupGRE_Name (tcg_rdr_env defTc) . snd) needs
 
-    -- Everything the spelling can refer to at the target, resolved the
-    -- way the renamer resolves a written reference: qualifiers are
-    -- honoured and record fields participate exactly when their
-    -- selectors do.
-    visible rdr =
-      Rdr.lookupGRE targetEnv (Rdr.LookupRdrName rdr (Rdr.RelevantGREsFOS Rdr.WantNormal))
+    visible = visibleIn targetEnv
 
     -- spellings that do not already mean the right thing in the target
     missing = filter (not . satisfied) userWritten
@@ -74,21 +70,22 @@ importEdits defTc targetTc targetSource targetContents needs
     -- occurrence" error.
     conflicting (rdr, n) = any ((/= n) . gre_name) (visible rdr)
 
-    sources = map (importModuleFor defTc . snd) missing
+    sources = map (importSpecFor defTc targetEnv . snd) missing
     unqualByModule =
       M.fromListWith (<>)
-        [ (m, [nameOccName n])
-        | ((Unqual _, n), Just m) <- zip missing sources
+        [ (m, [item])
+        | ((Unqual _, _), Just (m, item)) <- zip missing sources
         ]
     qualImports =
       S.fromList
         [ (m, q)
-        | ((Qual q _, _), Just m) <- zip missing sources
+        | ((Qual q _, _), Just (m, _)) <- zip missing sources
         ]
     importText =
       T.pack $ unlines $
-        [ "import " <> moduleNameString m <> " (" <> renderOccs occs <> ")"
-        | (m, occs) <- M.toAscList unqualByModule
+        [ "import " <> moduleNameString m
+            <> " (" <> intercalate ", " (sort items) <> ")"
+        | (m, items) <- M.toAscList unqualByModule
         ] <>
         [ "import qualified " <> moduleNameString m <> alias
         | (m, q) <- S.toAscList qualImports
@@ -97,16 +94,27 @@ importEdits defTc targetTc targetSource targetContents needs
                 | otherwise = " as " <> moduleNameString q
         ]
 
+-- | Everything a spelling can refer to in the given environment,
+-- resolved the way the renamer resolves a written reference: qualifiers
+-- are honoured and record fields participate exactly when their
+-- selectors do.
+visibleIn :: GlobalRdrEnv -> RdrName -> [GlobalRdrElt]
+visibleIn env rdr =
+  Rdr.lookupGRE env (Rdr.LookupRdrName rdr (Rdr.RelevantGREsFOS Rdr.WantNormal))
+
+-- | The module to import @name@ from and the import-list item that
+-- provides it there, or 'Nothing' if it cannot be imported.
+importSpecFor :: TcGblEnv -> GlobalRdrEnv -> Name -> Maybe (ModuleName, String)
+importSpecFor defTc targetEnv name =
+  (,) <$> importModuleFor defTc name <*> importItemFor defTc targetEnv name
+
 -- | The module to import @name@ from, or 'Nothing' if it cannot be
 -- imported. A name the defining module bound locally is importable from
 -- there exactly when it is exported; a name the defining module itself
 -- imported is importable from whichever module that import named (which
--- handles re-exports, unlike 'nameModule'). Only plain variables and
--- type constructors get imports -- data constructors and record fields
--- need their parent in the import list, which we conservatively refuse.
+-- handles re-exports, unlike 'nameModule').
 importModuleFor :: TcGblEnv -> Name -> Maybe ModuleName
 importModuleFor defTc name
-  | not importableOcc = Nothing
   | nameIsLocalOrFrom (tcg_mod defTc) name =
       if name `elemNameSet` availsToNameSet (tcg_exports defTc)
         then Just (moduleName (tcg_mod defTc))
@@ -115,13 +123,32 @@ importModuleFor defTc name
   , spec : _ <- gre_imp gre =
       Just (moduleName (is_mod (is_decl spec)))
   | otherwise = moduleName <$> nameModule_maybe name
+
+-- | The import-list item that provides @name@: the name itself for a
+-- plain variable or type constructor, and @Parent(Ctor)@ for a data
+-- constructor -- an import list cannot name a constructor bare, so its
+-- parent type supplies it (a constructor is only ever exported through
+-- its parent, so the parent is available wherever the constructor is).
+-- That item imports the parent /type/ alongside the constructor, so a
+-- same-spelled type already meaning something else at the target would
+-- turn its existing references ambiguous; such an item is refused.
+-- Record fields would need the same parent treatment but resolve per
+-- record under DuplicateRecordFields; they stay conservatively refused.
+importItemFor :: TcGblEnv -> GlobalRdrEnv -> Name -> Maybe String
+importItemFor defTc targetEnv name
+  | isVarOcc occ || isTcOcc occ = Just (renderOcc occ)
+  | isDataOcc occ = do
+      gre <- lookupGRE_Name (tcg_rdr_env defTc) name
+      Rdr.ParentIs parent <- Just (Rdr.gre_par gre)
+      guard $ all ((== parent) . gre_name) $
+        visibleIn targetEnv (Unqual (nameOccName parent))
+      pure $
+        renderOcc (nameOccName parent) <> "(" <> renderOcc occ <> ")"
+  | otherwise = Nothing
   where
     occ = nameOccName name
-    importableOcc = isVarOcc occ || isTcOcc occ
 
-renderOccs :: [OccName] -> String
-renderOccs = intercalate ", " . sort . map renderOcc
-  where
-    renderOcc occ
-      | isSymOcc occ = "(" <> occNameString occ <> ")"
-      | otherwise    = occNameString occ
+renderOcc :: OccName -> String
+renderOcc occ
+  | isSymOcc occ = "(" <> occNameString occ <> ")"
+  | otherwise    = occNameString occ

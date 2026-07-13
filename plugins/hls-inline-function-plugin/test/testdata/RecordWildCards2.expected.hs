@@ -12,5 +12,5 @@ e :: Config -> Int -> Int
 e c@Config{..} y = x + y
 
 f :: Int -> Int
-f x1 = case (Config 10, x1) of
-        (c@Config{..}, y) -> x + y
+f x = case (Config 10, x) of
+  (c@Config{x = x1, ..}, y) -> x1 + y
