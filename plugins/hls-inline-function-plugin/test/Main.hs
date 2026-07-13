@@ -685,6 +685,31 @@ soakRegressionTests = testGroup "soak regressions" [
     -- rewrite reaches the second module through the hiedb reference index,
     -- so the test waits for that module to be indexed first.
   , crossModuleSyncTest "A RecordWildCards dispatch is not inlined into a second module that lacks the extension" "WildcardPatHave" (Position 15 13) "Inline addP" "WildcardPatLack"
+    -- Found on ghcide's findLocalCompletions ('Inline generalCompls'):
+    -- the let-bound body is a multi-line comprehension whose
+    -- continuation lines hang left of its head -- legal inside
+    -- brackets, where GHC suspends layout, but their column deltas are
+    -- negative relative to the head that anchors them. Spliced into
+    -- the shallower 'in' body they underflowed, landing left of the
+    -- enclosing case alternative's layout column and closing its
+    -- layout early ("parse error"). retrie now clamps the hanging
+    -- lines to the comprehension's own anchor
+    -- ('normalizeHangingComprehensions'), which is valid at any graft
+    -- column; the golden pins that layout.
+  , serverSyncTest "A hanging comprehension from a let still parses when spliced shallower" "CompreLet" (Position 18 11) "Inline generalThings"
+  , runTest "A hanging comprehension re-anchors at its head when spliced (layout)" "Inline generalThings" "CompreLet" (Position 18 11)
+    -- Found on ghcide's getNextPragmaInfo (Spans.Pragmas): the body is
+    -- a multi-way if. Spliced parenthesized into the deeper 'pure $'
+    -- argument of a do statement, the guard continuation lines
+    -- resolved against the do block's layout offset instead of
+    -- re-anchoring at the if's first guard, landed left of it, and
+    -- closed the guard layout early ("parse error"). MultiWayIf opens
+    -- a GHC layout context for its guards like '\case' does for
+    -- alternatives; fixed in ghc-exactprint's HsMultiIf with the same
+    -- setLayoutBoth the HsLam LamCase/LamCases fix added. The golden
+    -- pins the re-based guard columns.
+  , serverSyncTest "A multi-way-if body still parses when spliced at a deeper column" "MultiWayIfDeep" (Position 22 9) "Inline classify"
+  , runTest "A multi-way-if body re-bases its guards at a deeper splice site (layout)" "Inline classify" "MultiWayIfDeep" (Position 22 9)
   ]
 
 -- | Inlining every call site of a module-private definition leaves it
