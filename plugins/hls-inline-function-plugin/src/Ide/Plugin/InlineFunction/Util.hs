@@ -8,6 +8,7 @@ module Ide.Plugin.InlineFunction.Util
   , grhsList
   , matchPats
   , refSpellings
+  , nameRefSpans
   ) where
 
 import           GHC.Hs
@@ -106,3 +107,22 @@ toRealSrcSpan = \case
 
 location :: LocatedA a -> Maybe RealSrcSpan
 location = toRealSrcSpan . getLocA
+
+-- | Spans of every occurrence of @name@ in the tree. The renamed source
+-- carries names in two located shapes: plain located 'Name's (binding
+-- sites, signatures, annotations, rules) and -- on GHC 9.14+ --
+-- occurrences wrapped in 'WithUserRdr' (every expression reference).
+nameRefSpans :: Data a => Name -> a -> [SrcSpan]
+#if __GLASGOW_HASKELL__ >= 913
+nameRefSpans name = everything (<>) ([] `mkQ` locName `extQ` occName)
+  where
+    locName :: LocatedN Name -> [SrcSpan]
+    locName (L l n) = [locA l | n == name]
+    occName :: GenLocated SrcSpanAnnN (WithUserRdr Name) -> [SrcSpan]
+    occName (L l (WithUserRdr _ n)) = [locA l | n == name]
+#else
+nameRefSpans name = everything (<>) ([] `mkQ` locName)
+  where
+    locName :: LocatedN Name -> [SrcSpan]
+    locName (L l n) = [locA l | n == name]
+#endif

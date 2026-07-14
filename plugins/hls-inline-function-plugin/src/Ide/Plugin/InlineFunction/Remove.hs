@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 -- | Decide whether inlining every call site leaves the function's
 -- definition unused, and build the edits that delete it.
 --
@@ -30,19 +28,14 @@ module Ide.Plugin.InlineFunction.Remove
   ) where
 
 import           Control.Monad                     (guard)
-import           Data.Generics                     (Data, everything, listify,
-                                                    mkQ)
-#if __GLASGOW_HASKELL__ >= 913
-import           Data.Generics                     (extQ)
-#endif
+import           Data.Generics                     (Data, listify)
 import qualified Data.Map                          as M
 import           Data.Maybe                        (mapMaybe)
 import qualified Data.Set                          as S
 import qualified Data.Text                         as T
 import           Development.IDE.GHC.Compat
-import           GHC.Hs
-import           Ide.Plugin.InlineFunction.Resolve (CallSite (..), findBinder)
-import           Ide.Plugin.InlineFunction.Util    (toRealSrcSpan)
+import           Ide.Plugin.InlineFunction.Resolve
+import           Ide.Plugin.InlineFunction.Util
 import           Language.LSP.Protocol.Types       (Position (..), Range (..),
                                                     TextEdit (..))
 
@@ -98,25 +91,6 @@ refsCovered covered name rn = all coveredBy (nameRefSpans name rn)
     coveredBy l = case toRealSrcSpan l of
       Nothing -> False
       Just sp -> any (`containsSpan` sp) covered
-
--- | Spans of every occurrence of @name@ in the tree. The renamed source
--- carries names in two located shapes: plain located 'Name's (binding
--- sites, signatures, annotations, rules) and -- on GHC 9.14+ --
--- occurrences wrapped in 'WithUserRdr' (every expression reference).
-nameRefSpans :: Data a => Name -> a -> [SrcSpan]
-#if __GLASGOW_HASKELL__ >= 913
-nameRefSpans name = everything (<>) ([] `mkQ` locName `extQ` occName)
-  where
-    locName :: LocatedN Name -> [SrcSpan]
-    locName (L l n) = [locA l | n == name]
-    occName :: GenLocated SrcSpanAnnN (WithUserRdr Name) -> [SrcSpan]
-    occName (L l (WithUserRdr _ n)) = [locA l | n == name]
-#else
-nameRefSpans name = everything (<>) ([] `mkQ` locName)
-  where
-    locName :: LocatedN Name -> [SrcSpan]
-    locName (L l n) = [locA l | n == name]
-#endif
 
 -- | Whether retrie actually rewrote every requested call site, judged
 -- from the graft locations it reported. A site is discharged when a
