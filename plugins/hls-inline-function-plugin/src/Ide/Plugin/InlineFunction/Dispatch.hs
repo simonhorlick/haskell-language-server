@@ -1,7 +1,7 @@
 -- | Build the dispatch-preserving rewrites used when no single clause of
--- a definition is decidable at a call site (tier 2): instead of splicing
--- one clause's body, splice an expression that keeps the clause dispatch
--- itself. For a definition
+-- a definition is decidable at a call site: instead of splicing one clause's
+-- body, splice an expression that keeps the clause dispatch itself. For a
+-- definition
 --
 -- > f 0 y = a
 -- > f x y = b
