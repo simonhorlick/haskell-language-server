@@ -653,7 +653,9 @@ common inlineFunction
 
 library hls-inline-function-plugin
   import:           defaults, pedantic, warnings
-  if !flag(inlineFunction)
+  -- retrie does not support GHC 9.10, and there are too many test failures
+  -- on earlier ghc versions.
+  if !flag(inlineFunction) || impl(ghc < 9.14)
     buildable: False
   exposed-modules:
     Ide.Plugin.InlineFunction
@@ -691,7 +693,9 @@ library hls-inline-function-plugin
 
 test-suite hls-inline-function-plugin-tests
   import:           defaults, pedantic, test-defaults, warnings
-  if !flag(inlineFunction)
+  -- retrie does not support GHC 9.10, and there are too many test failures
+  -- on earlier ghc versions.
+  if !flag(inlineFunction) || impl(ghc < 9.14)
     buildable: False
   type:             exitcode-stdio-1.0
   hs-source-dirs:   plugins/hls-inline-function-plugin/test
