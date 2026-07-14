@@ -435,7 +435,7 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities re
             Left err -> do
               logWith recorder Logger.Warning (LogBuildEditsFailed err)
               pure $ TargetFailed ("the rewrite failed: " <> T.pack err)
-            Right (printed, edits, grafts, captureRefusals) -> do
+            Right (printed, edits, grafts) -> do
               let usesGone = usesGoneAfter grafts
                   -- the deletion edits are built against the same
                   -- exact-printed text as the rewrite's edits, so they
@@ -448,12 +448,13 @@ rewriteTarget recorder state pos scope cand (defSource, defCheck) defFixities re
                       -> ds
                     _ -> []
               case edits of
-                -- every site was refused: a binding at each one would
-                -- capture a variable of the inlined body, changing its
-                -- meaning, so the file must be left unchanged
-                [] | not (null captureRefusals) ->
+                -- no edit came back for a requested site. Retrie passes
+                -- a site over when a binding enclosing it would capture
+                -- a variable of the inlined body (or the site failed to
+                -- match); either way the file must be left unchanged
+                [] | not (sitesDischarged sites grafts) ->
                   pure $ TargetNotRewritable
-                    "a binding at the call site would capture a variable of the inlined body"
+                    "a call site could not be rewritten; a binding there may capture a variable of the inlined body"
                 -- no call site was rewritten, so don't add imports either
                 [] -> pure $ TargetSkipped (Removability usesGone [])
                 -- the edits' line ranges refer to the exact-printed
