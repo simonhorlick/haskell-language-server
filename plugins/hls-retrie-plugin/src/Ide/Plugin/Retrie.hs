@@ -37,7 +37,6 @@ import           Data.IORef.Extra                     (atomicModifyIORef'_,
                                                        newIORef, readIORef)
 import           Data.List.Extra                      (find, nubOrdOn)
 import qualified Data.Map                             as Map
-import           Data.Maybe                           (catMaybes)
 import           Data.Monoid                          (First (First))
 import           Data.String                          (IsString)
 import qualified Data.Text                            as T
@@ -88,6 +87,7 @@ import qualified GHC                                  as GHCGHC
 import           GHC.Generics                         (Generic)
 import           Ide.Plugin.Error                     (PluginError (PluginInternalError),
                                                        getNormalizedFilePathE)
+import           Ide.Plugin.Resolve                   (mkCodeActionHandlerWithResolve)
 import           Ide.PluginUtils
 import           Ide.Types
 import qualified Language.LSP.Protocol.Lens           as L
@@ -126,36 +126,24 @@ import           GHC.Types.PkgQual
 
 data Log
   = LogParsingModule FilePath
+  | forall a. Pretty a => LogResolve a
 
 instance Pretty Log where
   pretty = \case
     LogParsingModule fp -> "Parsing module:" <+> pretty fp
+    LogResolve l        -> pretty l
 
 descriptor :: Recorder (WithPriority Log) -> PluginId -> PluginDescriptor IdeState
 descriptor recorder plId =
   (defaultPluginDescriptor plId "Provides code actions to inline Haskell definitions")
-    { pluginHandlers = mkPluginHandler SMethod_TextDocumentCodeAction provider
-    , pluginCommands = [retrieCommand recorder, retrieInlineThisCommand recorder]
+    { pluginHandlers =
+        mkCodeActionHandlerWithResolve
+          (cmapWithPrio LogResolve recorder)
+          provider
+          (resolveProvider recorder)
     }
 
-retrieCommandId :: CommandId
-retrieCommandId = "retrieCommand"
-
-retrieInlineThisCommandId :: CommandId
-retrieInlineThisCommandId = "retrieInlineThisCommand"
-
-retrieCommand :: Recorder (WithPriority Log) -> PluginCommand IdeState
-retrieCommand recorder =
-  PluginCommand retrieCommandId "run the refactoring" (runRetrieCmd recorder)
-
-retrieInlineThisCommand :: Recorder (WithPriority Log) -> PluginCommand IdeState
-retrieInlineThisCommand recorder =
-  PluginCommand
-    retrieInlineThisCommandId
-    "inline function call"
-    (runRetrieInlineThisCmd recorder)
-
--- | Parameters for the runRetrie PluginCommand.
+-- | Parameters for the runRetrie rewrite.
 data RunRetrieParams = RunRetrieParams
   { description               :: T.Text
   , rewrites                  :: [RewriteSpec]
@@ -164,37 +152,53 @@ data RunRetrieParams = RunRetrieParams
   }
   deriving (Eq, Show, Generic, FromJSON, ToJSON)
 
-runRetrieCmd :: Recorder (WithPriority Log) -> CommandFunction IdeState RunRetrieParams
-runRetrieCmd recorder state token RunRetrieParams{originatingFile = uri, ..} = ExceptT $
-  pluginWithIndefiniteProgress description token Cancellable $ \_updater -> do
-    _ <- runExceptT $ do
-      nfp <- getNormalizedFilePathE uri
-      (session, _) <-
-        runActionE "Retrie.GhcSessionDeps" state $
-          useWithStaleE
-            GhcSessionDeps
-            nfp
-      (ms, binds, _, _, _) <- runActionE "Retrie.getBinds" state $ getBinds nfp
-      let importRewrites = concatMap (extractImports ms binds) rewrites
-      (errors, edits) <-
-        liftIO $
-          callRetrie
-            recorder
-            state
-            (hscEnv session)
-            (map Right rewrites <> map Left importRewrites)
-            nfp
-            restrictToOriginatingFile
-      unless (null errors) $
-        lift $
-          pluginSendNotification SMethod_WindowShowMessage $
-            ShowMessageParams MessageType_Warning $
-              T.unlines $
-                "## Found errors during rewrite:"
-                  : ["-" <> T.pack (show e) | e <- errors]
-      _ <- lift $ pluginSendRequest SMethod_WorkspaceApplyEdit (ApplyWorkspaceEditParams Nothing edits) (\_ -> pure ())
-      return ()
-    return $ Right $ InR Null
+-- | Data stashed in a code action's @_data_@ field and passed back by the
+-- client in the resolve request, identifying the rewrite to perform.
+data RetrieResolveData
+  = ResolveRunRetrie RunRetrieParams
+  | ResolveInlineThis RunRetrieInlineThisParams
+  deriving (Eq, Show, Generic, FromJSON, ToJSON)
+
+-- | We receive a resolve request when the user has selected a code action in
+-- the UI. The client passes back the 'RetrieResolveData' we attached to the
+-- code action, from which we compute the 'WorkspaceEdit' to attach.
+resolveProvider :: Recorder (WithPriority Log) -> ResolveFunction IdeState RetrieResolveData Method_CodeActionResolve
+resolveProvider recorder state _plId ca _uri = \case
+  ResolveRunRetrie params  -> resolveRunRetrie recorder state ca params
+  ResolveInlineThis params -> resolveInlineThis recorder state ca params
+
+resolveRunRetrie
+  :: Recorder (WithPriority Log)
+  -> IdeState
+  -> CodeAction
+  -> RunRetrieParams
+  -> ExceptT PluginError (HandlerM Config) CodeAction
+resolveRunRetrie recorder state ca RunRetrieParams{originatingFile = uri, ..} = ExceptT $
+  pluginWithIndefiniteProgress description Nothing Cancellable $ \_updater -> runExceptT $ do
+    nfp <- getNormalizedFilePathE uri
+    (session, _) <-
+      runActionE "Retrie.GhcSessionDeps" state $
+        useWithStaleE GhcSessionDeps
+        nfp
+    (ms, binds, _, _, _) <- runActionE "Retrie.getBinds" state $ getBinds nfp
+    let importRewrites = concatMap (extractImports ms binds) rewrites
+    (errors, edits) <-
+      liftIO $
+        callRetrie
+          recorder
+          state
+          (hscEnv session)
+          (map Right rewrites <> map Left importRewrites)
+          nfp
+          restrictToOriginatingFile
+    unless (null errors) $
+      lift $
+        pluginSendNotification SMethod_WindowShowMessage $
+          ShowMessageParams MessageType_Warning $
+          T.unlines $
+            "## Found errors during rewrite:"
+              : ["-" <> T.pack (show e) | e <- errors]
+    return $ ca & L.edit ?~ edits
 
 data RunRetrieInlineThisParams = RunRetrieInlineThisParams
   { inlineIntoThisLocation :: !Location
@@ -203,8 +207,13 @@ data RunRetrieInlineThisParams = RunRetrieInlineThisParams
   }
   deriving (Eq, Show, Generic, FromJSON, ToJSON)
 
-runRetrieInlineThisCmd :: Recorder (WithPriority Log) -> CommandFunction IdeState RunRetrieInlineThisParams
-runRetrieInlineThisCmd recorder state _token RunRetrieInlineThisParams{..} = do
+resolveInlineThis
+  :: Recorder (WithPriority Log)
+  -> IdeState
+  -> CodeAction
+  -> RunRetrieInlineThisParams
+  -> ExceptT PluginError (HandlerM Config) CodeAction
+resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = do
   nfp <- getNormalizedFilePathE $ getLocationUri inlineIntoThisLocation
   nfpSource <- getNormalizedFilePathE $ getLocationUri inlineFromThisLocation
   -- What we do here:
@@ -239,13 +248,7 @@ runRetrieInlineThisCmd recorder state _token RunRetrieInlineThisParams{..} = do
             | r@Replacement{..} <- replacements
             , RealSrcSpan intoRange Nothing `GHC.isSubspanOf` replLocation
             ]
-      _ <-
-        lift $
-          pluginSendRequest
-            SMethod_WorkspaceApplyEdit
-            (ApplyWorkspaceEditParams Nothing wedit)
-            (\_ -> pure ())
-      return $ InR Null
+      return $ ca & L.edit ?~ wedit
 
 -- Override to skip adding binders to the context, which prevents inlining
 -- nested defined functions
@@ -300,7 +303,7 @@ extractImports _ _ _ = []
 -------------------------------------------------------------------------------
 
 provider :: PluginMethodHandler IdeState Method_TextDocumentCodeAction
-provider state plId (CodeActionParams _ _ (TextDocumentIdentifier uri) range ca) = do
+provider state _plId (CodeActionParams _ _ (TextDocumentIdentifier uri) range ca) = do
   let (LSP.CodeActionContext _diags _monly _) = ca
   nfp <- getNormalizedFilePathE uri
 
@@ -314,21 +317,26 @@ provider state plId (CodeActionParams _ _ (TextDocumentIdentifier uri) range ca)
   let pos = range ^. L.start
   let rewrites = concatMap (suggestBindRewrites uri pos ms_mod) topLevelBinds
 
-  retrieCommands <- lift $
-    forM rewrites $ \(title, kind, params) -> liftIO $ do
-      let c = mkLspCommand plId retrieCommandId title (Just [toJSON params])
-      return $ CodeAction title (Just kind) Nothing Nothing Nothing Nothing (Just c) Nothing
+  let retrieActions =
+        [ mkCodeAction title kind (ResolveRunRetrie params)
+        | (title, kind, params) <- rewrites
+        ]
 
   inlineSuggestions <-
     liftIO $
       runIdeAction "" extras $
-        suggestBindInlines plId uri topLevelBinds range withHieDb (lookupMod hiedbWriter)
-  let inlineCommands =
-        [ Just $
-            CodeAction _title (Just CodeActionKind_RefactorInline) Nothing Nothing Nothing Nothing (Just c) Nothing
-        | c@Command{..} <- inlineSuggestions
+        suggestBindInlines uri topLevelBinds range withHieDb (lookupMod hiedbWriter)
+  let inlineActions =
+        [ mkCodeAction title CodeActionKind_RefactorInline (ResolveInlineThis params)
+        | (title, params) <- inlineSuggestions
         ]
-  return $ InL [InR c | c <- retrieCommands ++ catMaybes inlineCommands]
+  return $ InL [InR c | c <- retrieActions ++ inlineActions]
+
+-- | A code action carrying only its resolve data; the edit is computed in
+-- 'resolveProvider' once the action is selected.
+mkCodeAction :: T.Text -> CodeActionKind -> RetrieResolveData -> CodeAction
+mkCodeAction title kind resolveData =
+  CodeAction title (Just kind) Nothing Nothing Nothing Nothing Nothing (Just (toJSON resolveData))
 
 getLocationUri :: Location -> Uri
 getLocationUri Location{_uri} = _uri
@@ -391,14 +399,13 @@ suggestBindRewrites _ _ _ _ = []
 
 -- find all the identifiers in the AST for which have source definitions
 suggestBindInlines
-  :: PluginId
-  -> Uri
+  :: Uri
   -> [HsBindLR GhcRn GhcRn]
   -> Range
   -> WithHieDb
   -> (FilePath -> GHCGHC.ModuleName -> GHCGHC.Unit -> Bool -> MaybeT IdeAction Uri)
-  -> IdeAction [Command]
-suggestBindInlines plId _uri binds range hie lookupMod = do
+  -> IdeAction [(T.Text, RunRetrieInlineThisParams)]
+suggestBindInlines _uri binds range hie lookupMod = do
   identifiers <- definedIdentifiers
   return $
     map
@@ -412,8 +419,7 @@ suggestBindInlines plId _uri binds range hie lookupMod = do
                 , inlineFromThisLocation = srcLoc
                 , inlineThisDefinition = printedName
                 }
-           in
-            mkLspCommand plId retrieInlineThisCommandId title (Just [toJSON params])
+           in (title, params)
       )
       (Set.toList identifiers)
   where
