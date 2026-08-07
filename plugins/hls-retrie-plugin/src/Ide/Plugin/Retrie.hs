@@ -262,7 +262,11 @@ myContextUpdater c i =
     -- override to skip the HsLet case
     updExp :: HsExpr GhcPs -> Context
     updExp HsApp{} =
+#if MIN_VERSION_ghc(9,11,0)
+      c{ctxtParentPrec = HasPrec $ Retrie.Fixity (10 + i - firstChild) InfixL}
+#else
       c{ctxtParentPrec = HasPrec $ Retrie.Fixity (SourceText "HsApp") (10 + i - firstChild) InfixL}
+#endif
     -- Reason for 10 + i: (i is index of child, 0 = left, 1 = right)
     -- In left child, prec is 10, so HsApp child will NOT get paren'd
     -- In right child, prec is 11, so every child gets paren'd (unless atomic)
@@ -358,8 +362,13 @@ getBinds nfp = do
         XValBindsLR (GHC.NValBinds binds _sigs :: GHC.NHsValBindsLR GhcRn) ->
           pure
             [ decl
+#if MIN_VERSION_ghc(9,11,0)
+            | (_, listBinds) <- binds
+            , L _ decl <- listBinds
+#else
             | (_, bagBinds) <- binds
             , L _ decl <- bagToList bagBinds
+#endif
             ]
       return (tmrModSummary tm, topLevelBinds, posMapping)
 
@@ -421,8 +430,20 @@ suggestBindInlines plId _uri binds range hie lookupMod = do
       -- we only select candidates for which we have source code
       everything (<>) (pure mempty `mkQ` getDefinedIdentifierDetailsViaHieDb a b) it
 
-    getDefinedIdentifierDetailsViaHieDb :: WithHieDb -> LookupModule IdeAction -> GHC.LIdP GhcRn -> IdeAction (Set.HashSet (GHC.OccName, Location, Location))
-    getDefinedIdentifierDetailsViaHieDb withHieDb lookupModule lname | name <- unLoc lname =
+#if MIN_VERSION_ghc(9,13,0)
+    getDefinedIdentifierDetailsViaHieDb
+      :: WithHieDb
+      -> LookupModule IdeAction
+      -> GHCGHC.LIdOccP GhcRn
+      -> IdeAction (Set.HashSet (GHC.OccName, Location, Location))
+#else
+    getDefinedIdentifierDetailsViaHieDb
+      :: WithHieDb
+      -> LookupModule IdeAction
+      -> GHC.LIdP GhcRn
+      -> IdeAction (Set.HashSet (GHC.OccName, Location, Location))
+#endif
+    getDefinedIdentifierDetailsViaHieDb withHieDb lookupModule lname | name <- GHCGHC.getName (unLoc lname) =
       case srcSpanToLocation (GHC.getLocA lname) of
         Just siteLoc
           | siteRange <- getLocationRange siteLoc
@@ -684,6 +705,10 @@ toImportDecl AddImport{..} = GHC.ImportDecl{ideclSource = ideclSource', ..}
     ideclQualified = if ideclQualifiedBool then GHC.QualifiedPre else GHC.NotQualified
 
     ideclPkgQual = NoRawPkgQual
+
+#if MIN_VERSION_ghc(9,13,0)
+    ideclLevelSpec = GHCGHC.NotLevelled
+#endif
 
     ideclImportList = Nothing
     ideclExt =
