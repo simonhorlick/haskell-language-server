@@ -92,3 +92,13 @@ if impl(ghc >= 9.14)
     time-compat:time,
     uuid-types:template-haskell,
     websockets:containers,
+
+
+source-repository-package
+  type: git
+  location: https://github.com/simonhorlick/retrie.git
+  tag: 80327ebe4e5ed3b3276b027b590ad600305646bf
+
+package retrie
+  tests: False
+  benchmarks: False
