@@ -76,6 +76,14 @@ inlineThisTests =
       , expectFailBecause "rn" $ testCommand "qualified" "Qualified" 5 6
       , testCommand "multi-line body at a deeper call site" "LayoutDeep" 13 8
       ]
+    , expectFail $ testGroup "dispatch"
+      [ testCommand "dispatch multi clause" "MultiClause" 7 4
+      , testCommand "transfer guards to case" "Guards" 9 4
+      , testCommand "multi parameter dispatch" "MultiClauseTuple" 7 6
+      , testCommand "multi clause partial" "MultiClausePartial" 8 8
+      , testCommand "dispatch wildcard argument" "RecordWildCards2" 14 6
+      , testCommand "dispatch wildcard construction from parameters" "RecordWildCardsConstruct" 10 4
+      ]
     ]
 
 testProvider :: TestName -> FilePath -> UInt -> UInt -> [Text] -> TestTree
