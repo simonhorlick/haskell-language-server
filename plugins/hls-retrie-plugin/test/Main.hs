@@ -65,6 +65,7 @@ inlineThisTests =
       , expectFailBecause "rn" $ testCommand "let capture" "LetCapture" 5 36
       , testCommand "infix with extra arguments" "InfixExtraArg" 8 8
       , testCommand "list use" "ListLiteral" 6 5
+      , expectFailBecause "rn" $ testCommand "parens around a right-associative body on the LHS" "RightAssocOp" 10 4
       ]
     ]
 
