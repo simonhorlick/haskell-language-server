@@ -64,6 +64,7 @@ inlineThisTests =
       , testCommand "lambda with a pattern" "PatternLambda" 4 4
       , expectFailBecause "rn" $ testCommand "let capture" "LetCapture" 5 36
       , testCommand "infix with extra arguments" "InfixExtraArg" 8 8
+      , testCommand "list use" "ListLiteral" 6 5
       ]
     ]
 
