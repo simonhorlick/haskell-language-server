@@ -57,6 +57,7 @@ inlineThisTests =
       , testCommand "nested where function" "Where" 3 6
       , testCommand "nested let function" "NestedLet" 6 12
       , testCommand "operator" "Operator" 4 16
+      , testCommand "uses imported fixities" "OpChain" 10 4
       ]
     ]
 

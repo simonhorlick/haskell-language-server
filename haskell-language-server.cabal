@@ -707,6 +707,8 @@ library hls-retrie-plugin
   if !(flag(retrie) && (!impl(ghc ==9.10.*) || flag(ignore-plugins-ghc-bounds)))
     buildable: False
   exposed-modules:  Ide.Plugin.Retrie
+  other-modules:
+    Ide.Plugin.Retrie.Fixity
   hs-source-dirs:   plugins/hls-retrie-plugin/src
   build-depends:
     , aeson
@@ -725,6 +727,7 @@ library hls-retrie-plugin
     , retrie                >=2.0.0
     , safe-exceptions
     , stm
+    , syb
     , text
     , text-rope
     , transformers
