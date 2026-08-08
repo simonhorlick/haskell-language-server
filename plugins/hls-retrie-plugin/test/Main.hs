@@ -66,6 +66,9 @@ inlineThisTests =
       , testCommand "infix with extra arguments" "InfixExtraArg" 8 8
       , testCommand "list use" "ListLiteral" 6 5
       , expectFailBecause "rn" $ testCommand "parens around a right-associative body on the LHS" "RightAssocOp" 10 4
+      , testCommand "where to let" "Where2" 6 6
+      , testCommand "where to let annotation" "Where3" 7 6
+      , testCommand "substitutes arguments into the where clause" "Where5" 6 4
       ]
     ]
 
