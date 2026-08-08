@@ -87,6 +87,13 @@ inlineThisTests =
       , testCommand "qualified" "Qualified" 5 6
       , testCommand "multi-line body at a deeper call site" "LayoutDeep" 13 8
       ]
+    , expectFail $ testGroup "imports"
+      [ testCommand "appends an import" "CrossFileUse" 6 4
+      , testCommand "append import at layout column" "IndentImportUse" 6 6
+      , testCommand "import unqualified to match template" "QualifiedScopeUse" 6 4
+      , testCommand "import qualified" "QualifiedBodyUse" 5 4
+      , testCommand "reject if required import isn't exported" "CrossModuleNotExportedUse" 4 4
+      ]
     , testGroup "inline everywhere"
       [ testEverywhere "rewrites all call sites in the module" "Everywhere" 6 4
       , testEverywhere "offered on the top-level binder" "Everywhere" 3 0
