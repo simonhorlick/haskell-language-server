@@ -69,6 +69,7 @@ inlineThisTests =
       , testCommand "where to let" "Where2" 6 6
       , testCommand "where to let annotation" "Where3" 7 6
       , testCommand "substitutes arguments into the where clause" "Where5" 6 4
+      , testCommand "lambda outside the let for a partially applied function" "PartialLet" 8 8
       ]
     ]
 
