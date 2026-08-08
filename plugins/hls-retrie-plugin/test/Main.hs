@@ -58,6 +58,7 @@ inlineThisTests =
       , testCommand "nested let function" "NestedLet" 6 12
       , testCommand "operator" "Operator" 4 16
       , testCommand "uses imported fixities" "OpChain" 10 4
+      , testCommand "expression has lower precedence" "BodyParens" 6 8
       ]
     ]
 
