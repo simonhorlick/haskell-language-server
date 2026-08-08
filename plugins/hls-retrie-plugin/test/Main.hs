@@ -71,6 +71,7 @@ inlineThisTests =
       , testCommand "substitutes arguments into the where clause" "Where5" 6 4
       , testCommand "lambda outside the let for a partially applied function" "PartialLet" 8 8
       , expectFail $ testCommand "renames a RecordWildCards binding that would capture an argument" "RecordWildCards" 14 6
+      , expectFail $ testCommand "refuses a site where a where-binding would capture a free variable" "CaptureWhere" 9 6
       ]
     ]
 
