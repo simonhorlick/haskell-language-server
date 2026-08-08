@@ -59,6 +59,9 @@ inlineThisTests =
       , testCommand "operator" "Operator" 4 16
       , testCommand "uses imported fixities" "OpChain" 10 4
       , testCommand "expression has lower precedence" "BodyParens" 6 8
+      , testCommand "expression is let" "Let" 6 4
+      , testCommand "partially applied function" "Partial" 7 8
+      , testCommand "lambda with a pattern" "PatternLambda" 4 4
       ]
     ]
 
