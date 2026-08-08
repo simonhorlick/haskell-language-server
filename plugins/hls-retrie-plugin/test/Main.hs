@@ -73,6 +73,7 @@ inlineThisTests =
       , expectFail $ testCommand "renames a RecordWildCards binding that would capture an argument" "RecordWildCards" 14 6
       , expectFail $ testCommand "refuses a site where a where-binding would capture a free variable" "CaptureWhere" 9 6
       , expectFail $ testCommand "refuses a capturing site when the capture is via the argument" "ArgRename" 11 6
+      , expectFail $ testCommand "qualified" "Qualified" 5 6
       ]
     ]
 
