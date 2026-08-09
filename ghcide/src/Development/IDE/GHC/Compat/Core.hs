@@ -347,6 +347,9 @@ module Development.IDE.GHC.Compat.Core (
     module GHC.Types.Name.Cache,
     module GHC.Types.Name.Env,
     module GHC.Types.Name.Reader,
+#if !MIN_VERSION_ghc(9,13,0)
+    unLocWithUserRdr,
+#endif
     module GHC.Utils.Error,
 #if !MIN_VERSION_ghc(9,7,0)
     module GHC.Types.Avail,
@@ -768,4 +771,12 @@ mkSimpleTarget df fp = Target (TargetFile fp Nothing) True (homeUnitId_ df) Noth
 
 #if MIN_VERSION_ghc(9,7,0)
 lookupGlobalRdrEnv gre_env occ = lookupGRE gre_env (LookupOccName occ AllRelevantGREs)
+#endif
+
+#if !MIN_VERSION_ghc(9,13,0)
+-- GHC 9.14 wraps occurrence names in WithUserRdr ('LIdOccP' is
+-- 'Located (WithUserRdr Name)'); before that the wrapper doesn't exist
+-- and occurrences are plain 'Located Name'.
+unLocWithUserRdr :: SrcLoc.GenLocated l a -> a
+unLocWithUserRdr = SrcLoc.unLoc
 #endif
