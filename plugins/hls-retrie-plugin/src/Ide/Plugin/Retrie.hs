@@ -252,7 +252,7 @@ resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = do
           cpp
   case result of
     Left err -> throwError $ PluginInternalError $ "Retrie - crashed with: " <> T.pack (show err)
-    Right (_, _, NoChange) -> throwError $ PluginInternalError "Retrie - inline produced no changes"
+    Right (_, _, NoChange) -> notRewritten
     Right (_, _, Change replacements imports) -> do
       let edits = asEditMap $ asTextEdits $ Change ourReplacement imports
           wedit = WorkspaceEdit (Just edits) Nothing Nothing
@@ -261,7 +261,19 @@ resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = do
             | r@Replacement{..} <- replacements
             , RealSrcSpan intoRange Nothing `GHC.isSubspanOf` replLocation
             ]
-      return $ ca & L.edit ?~ wedit
+      -- no imports either when nothing was spliced in at our site
+      if null ourReplacement
+        then notRewritten
+        else return $ ca & L.edit ?~ wedit
+  where
+    notRewritten = do
+      lift $
+        pluginSendNotification SMethod_WindowShowMessage $
+          ShowMessageParams MessageType_Warning $
+            ca ^. L.title
+              <> ": the call site could not be rewritten; a binding there"
+              <> " may capture a variable of the inlined body"
+      return $ ca & L.edit ?~ WorkspaceEdit (Just mempty) Nothing Nothing
 
 extractImports :: ModSummary -> [HsBindLR GhcRn GhcRn] -> RewriteSpec -> [ImportSpec]
 extractImports ModSummary{ms_mod} topLevelBinds (Unfold thing)

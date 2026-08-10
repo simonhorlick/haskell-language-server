@@ -63,7 +63,7 @@ inlineThisTests =
       , testCommand "expression is let" "Let" 6 4
       , testCommand "partially applied function" "Partial" 7 8
       , testCommand "lambda with a pattern" "PatternLambda" 4 4
-      , expectFailBecause "rn" $ testCommand "let capture" "LetCapture" 5 36
+      , testCommand "let capture" "LetCapture" 5 36
       , testCommand "infix with extra arguments" "InfixExtraArg" 8 8
       , testCommand "list use" "ListLiteral" 6 5
       , testCommand "parens around a right-associative body on the LHS" "RightAssocOp" 10 4
@@ -72,8 +72,8 @@ inlineThisTests =
       , testCommand "substitutes arguments into the where clause" "Where5" 6 4
       , testCommand "lambda outside the let for a partially applied function" "PartialLet" 8 8
       , testCommand "rename RecordWildCards binding" "RecordWildCards" 14 6
-      , expectFailBecause "rn" $ testCommand "refuses a site where a where-binding would capture a free variable" "CaptureWhere" 9 6
-      , expectFailBecause "rn" $ testCommand "refuses a capturing site when the capture is via the argument" "ArgRename" 11 6
+      , testCommand "refuses a site where a where-binding would capture a free variable" "CaptureWhere" 9 6
+      , testCommand "refuses a capturing site when the capture is via the argument" "ArgRename" 11 6
       , testCommand "qualified" "Qualified" 5 6
       , testCommand "multi-line body at a deeper call site" "LayoutDeep" 13 8
       ]
