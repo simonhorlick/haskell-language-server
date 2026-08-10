@@ -708,6 +708,7 @@ library hls-retrie-plugin
     buildable: False
   exposed-modules:  Ide.Plugin.Retrie
   other-modules:
+    Ide.Plugin.Retrie.Dispatch
     Ide.Plugin.Retrie.Fixity
   hs-source-dirs:   plugins/hls-retrie-plugin/src
   build-depends:
@@ -719,6 +720,7 @@ library hls-retrie-plugin
     , ghcide                == 2.14.0.0
     , hashable
     , hls-plugin-api        == 2.14.0.0
+    , haskell-language-server:hls-exactprint-utils
     , haskell-language-server:hls-refactor-plugin
     , lens
     , lsp
