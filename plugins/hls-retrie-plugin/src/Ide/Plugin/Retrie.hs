@@ -52,11 +52,10 @@ import           Development.IDE.GHC.Compat           (GRHSs (GRHSs),
                                                        GenLocated (L), GhcPs,
                                                        GhcRn,
                                                        HsBindLR (FunBind),
-                                                       HsExpr (HsApp, OpApp),
-                                                       HsGroup (..),
+                                                       HsExpr, HsGroup (..),
                                                        HsValBindsLR (..),
                                                        HscEnv, ImportDecl (..),
-                                                       LHsExpr, Match,
+                                                       LHsExpr,
                                                        ModSummary (ModSummary, ms_hspp_buf, ms_mod),
                                                        Outputable, ParsedModule,
                                                        SourceText (..), fun_id,
@@ -91,19 +90,17 @@ import           Language.LSP.Protocol.Message        as LSP
 import           Language.LSP.Protocol.Types          as LSP
 import           Language.LSP.Server                  (ProgressCancellable (Cancellable))
 import           Retrie                               (Annotated (astA),
-                                                       AnnotatedModule,
-                                                       Fixity (Fixity),
-                                                       FixityDirection (InfixL),
-                                                       Options, Options_ (..),
+                                                       AnnotatedModule, Options,
+                                                       Options_ (..),
                                                        Verbosity (Loud),
                                                        addImports, apply,
-                                                       applyWithUpdate)
-import           Retrie.Context
+                                                       applyWithRenameInfo,
+                                                       mkRenameInfo)
 import           Retrie.CPP                           (CPP (NoCPP), parseCPP)
 import           Retrie.ExactPrint                    (fix, makeDeltaAst,
                                                        transformA, unsafeMkA)
 import           Retrie.Expr                          (mkLocatedHsVar)
-import           Retrie.Fixity                        (FixityEnv, lookupOp)
+import           Retrie.Fixity                        (FixityEnv)
 import           Retrie.Monad                         (getGroundTerms,
                                                        runRetrie)
 import           Retrie.Options                       (defaultOptions,
@@ -112,8 +109,7 @@ import           Retrie.Replace                       (Change (..),
                                                        Replacement (..))
 import           Retrie.Rewrites
 import           Retrie.Rewrites.Function             (matchToRewrites)
-import           Retrie.SYB                           (everything, extQ,
-                                                       listify, mkQ)
+import           Retrie.SYB                           (everything, listify, mkQ)
 import           Retrie.Types
 import           Retrie.Universe                      (Universe)
 
@@ -234,6 +230,10 @@ resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = do
   -- defining and target modules.
   (checkSource, _) <- runActionE "retrie" state $ useWithStaleE TypeCheck nfpSource
   (checkTarget, _) <- runActionE "retrie" state $ useWithStaleE TypeCheck nfp
+  let
+    defRn = tmrRenamed checkSource
+    targetRn = tmrRenamed checkTarget
+    renameInfo = mkRenameInfo defRn <> mkRenameInfo targetRn
   defMod <- liftIO $ fixedModule (hscEnv session) checkSource astSrc
   useFixities <- liftIO $
     fixityEnvFor (hscEnv session) (tmrTypechecked checkTarget) (tmrRenamed checkTarget)
@@ -248,7 +248,7 @@ resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = do
       try @_ @SomeException $
         runRetrie
           (fmFixities defMod <> useFixities)
-          (applyWithUpdate myContextUpdater inlineRewrite)
+          (applyWithRenameInfo renameInfo inlineRewrite)
           cpp
   case result of
     Left err -> throwError $ PluginInternalError $ "Retrie - crashed with: " <> T.pack (show err)
@@ -262,36 +262,6 @@ resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = do
             , RealSrcSpan intoRange Nothing `GHC.isSubspanOf` replLocation
             ]
       return $ ca & L.edit ?~ wedit
-
--- Override to skip adding binders to the context, which prevents inlining
--- nested defined functions
-myContextUpdater :: ContextUpdater
-myContextUpdater c i =
-  updateContext c i
-    `extQ` (return . updExp)
-    `extQ` (skipUpdate @(GRHSs GhcPs (LHsExpr GhcPs)))
-    `extQ` (skipUpdate @(Match GhcPs (LHsExpr GhcPs)))
-  where
-    skipUpdate :: forall a m. Monad m => a -> TransformT m Context
-    skipUpdate _ = pure c
-
-    -- override to skip the HsLet case
-    updExp :: HsExpr GhcPs -> Context
-    updExp HsApp{} =
-#if MIN_VERSION_ghc(9,11,0)
-      c{ctxtParentPrec = HasPrec $ Retrie.Fixity (10 + i - firstChild) InfixL}
-#else
-      c{ctxtParentPrec = HasPrec $ Retrie.Fixity (SourceText "HsApp") (10 + i - firstChild) InfixL}
-#endif
-    -- Reason for 10 + i: (i is index of child, 0 = left, 1 = right)
-    -- In left child, prec is 10, so HsApp child will NOT get paren'd
-    -- In right child, prec is 11, so every child gets paren'd (unless atomic)
-    updExp (OpApp _ _ op _) = c{ctxtParentPrec = HasPrec $ lookupOp op (ctxtFixityEnv c)}
-    updExp _ = c{ctxtParentPrec = NeverParen}
-    -- Deal with Trees-That-Grow adding extension points
-    -- as the first child everywhere.
-    firstChild :: Int
-    firstChild = 1
 
 extractImports :: ModSummary -> [HsBindLR GhcRn GhcRn] -> RewriteSpec -> [ImportSpec]
 extractImports ModSummary{ms_mod} topLevelBinds (Unfold thing)

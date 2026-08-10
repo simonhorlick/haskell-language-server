@@ -66,15 +66,15 @@ inlineThisTests =
       , expectFailBecause "rn" $ testCommand "let capture" "LetCapture" 5 36
       , testCommand "infix with extra arguments" "InfixExtraArg" 8 8
       , testCommand "list use" "ListLiteral" 6 5
-      , expectFailBecause "rn" $ testCommand "parens around a right-associative body on the LHS" "RightAssocOp" 10 4
+      , testCommand "parens around a right-associative body on the LHS" "RightAssocOp" 10 4
       , testCommand "where to let" "Where2" 6 6
       , testCommand "where to let annotation" "Where3" 7 6
       , testCommand "substitutes arguments into the where clause" "Where5" 6 4
       , testCommand "lambda outside the let for a partially applied function" "PartialLet" 8 8
-      , expectFailBecause "rn" $ testCommand "renames a RecordWildCards binding that would capture an argument" "RecordWildCards" 14 6
+      , testCommand "rename RecordWildCards binding" "RecordWildCards" 14 6
       , expectFailBecause "rn" $ testCommand "refuses a site where a where-binding would capture a free variable" "CaptureWhere" 9 6
       , expectFailBecause "rn" $ testCommand "refuses a capturing site when the capture is via the argument" "ArgRename" 11 6
-      , expectFailBecause "rn" $ testCommand "qualified" "Qualified" 5 6
+      , testCommand "qualified" "Qualified" 5 6
       , testCommand "multi-line body at a deeper call site" "LayoutDeep" 13 8
       ]
     , dispatchTest $ testGroup "dispatch"
@@ -82,7 +82,7 @@ inlineThisTests =
       , testCommand "transfer guards to case" "Guards" 9 4
       , testCommand "multi parameter dispatch" "MultiClauseTuple" 7 6
       , testCommand "multi clause partial" "MultiClausePartial" 8 8
-      , expectFailBecause "rn" $ testCommand "dispatch wildcard argument" "RecordWildCards2" 14 6
+      , testCommand "dispatch wildcard argument" "RecordWildCards2" 14 6
       , testCommand "dispatch wildcard construction from parameters" "RecordWildCardsConstruct" 10 4
       ]
     ]
