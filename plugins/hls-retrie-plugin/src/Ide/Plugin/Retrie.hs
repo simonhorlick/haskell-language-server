@@ -119,6 +119,8 @@ import           Retrie.Universe                      (Universe)
 
 import           GHC.Types.PkgQual
 
+import           Ide.Plugin.Retrie.Dispatch           (dispatchRewrites,
+                                                       triviallySelectable)
 import           Ide.Plugin.Retrie.Fixity
 
 data Log
@@ -631,12 +633,16 @@ constructInlineFromIdentifer originParsedModule originSpan = do
           -- trace (show (GHC.getLocA fun_id) <> ": " <> s fun_id) False = undefined
           | RealSrcSpan sp _ <- GHC.getLocA fun_id
           , sp == originSpan =
-              First $ Just (fun_id, fun_matches)
+            First $ Just (fun_id, fun_matches)
         matcher _ = First Nothing
     case ast of
-      First (Just (fun_id, fun_matches)) ->
-        let imports = mempty
-         in constructfromFunMatches imports fun_id fun_matches
+      First (Just (fun_id, fun_matches))
+        | not (triviallySelectable fun_matches) ->
+          -- if we can't statically determine the clause, generate an
+          -- expression that keeps the clause dispatch
+          map toURewrite <$> dispatchRewrites fun_id fun_matches
+        | otherwise -> do
+          constructfromFunMatches mempty fun_id fun_matches
       _ -> return $ error "could not find source code to inline"
 
 asEditMap :: [(Uri, TextEdit)] -> Map.Map Uri [TextEdit]

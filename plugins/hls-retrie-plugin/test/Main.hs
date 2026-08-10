@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP                      #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
 {-# LANGUAGE LambdaCase               #-}
 {-# LANGUAGE OverloadedStrings        #-}
@@ -76,15 +77,24 @@ inlineThisTests =
       , expectFailBecause "rn" $ testCommand "qualified" "Qualified" 5 6
       , testCommand "multi-line body at a deeper call site" "LayoutDeep" 13 8
       ]
-    , expectFail $ testGroup "dispatch"
+    , dispatchTest $ testGroup "dispatch"
       [ testCommand "dispatch multi clause" "MultiClause" 7 4
       , testCommand "transfer guards to case" "Guards" 9 4
       , testCommand "multi parameter dispatch" "MultiClauseTuple" 7 6
       , testCommand "multi clause partial" "MultiClausePartial" 8 8
-      , testCommand "dispatch wildcard argument" "RecordWildCards2" 14 6
+      , expectFailBecause "rn" $ testCommand "dispatch wildcard argument" "RecordWildCards2" 14 6
       , testCommand "dispatch wildcard construction from parameters" "RecordWildCardsConstruct" 10 4
       ]
     ]
+-- | Dispatch-preserving rewrites need the GHC >= 9.12 exact-print
+-- annotation API; older compilers fall back to per-clause rewrites and
+-- these goldens fail.
+dispatchTest :: TestTree -> TestTree
+#if __GLASGOW_HASKELL__ >= 912
+dispatchTest = id
+#else
+dispatchTest = expectFailBecause "dispatch needs GHC >= 9.12"
+#endif
 
 testProvider :: TestName -> FilePath -> UInt -> UInt -> [Text] -> TestTree
 testProvider title file line row expected = testCase title $ runWithRetrie $ do
