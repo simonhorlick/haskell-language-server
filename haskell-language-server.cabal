@@ -716,12 +716,14 @@ library hls-retrie-plugin
     , bytestring
     , containers
     , extra
+    , filepath
     , ghc
     , ghcide                == 2.14.0.0
     , hashable
     , hls-plugin-api        == 2.14.0.0
     , haskell-language-server:hls-exactprint-utils
     , haskell-language-server:hls-refactor-plugin
+    , hiedb
     , lens
     , lsp
     , lsp-types
