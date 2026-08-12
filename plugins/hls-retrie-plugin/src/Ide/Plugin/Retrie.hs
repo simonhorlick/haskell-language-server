@@ -63,6 +63,7 @@ import qualified Development.IDE.GHC.Compat           as GHC
 import           Development.IDE.GHC.Compat.Util      hiding (catch, try)
 import           Development.IDE.GHC.ExactPrint       (GetAnnotatedParsedSource (GetAnnotatedParsedSource),
                                                        TransformT)
+import           Development.IDE.Plugin.CodeAction    (newImportInsertRange)
 import           Development.IDE.Spans.AtPoint        (LookupModule,
                                                        nameToLocation)
 import           Development.IDE.Types.Shake          (WithHieDb)
@@ -85,6 +86,7 @@ import           Language.LSP.Protocol.Message        as LSP
 import           Language.LSP.Protocol.Types          as LSP
 import           Language.LSP.Server                  (ProgressCancellable (Cancellable))
 import           Retrie                               (Annotated (astA),
+                                                       AnnotatedImports,
                                                        AnnotatedModule,
                                                        RenameInfo,
                                                        applyWithRenameInfo,
@@ -206,13 +208,13 @@ rewriteTarget recorder state inlineRewrite defRenameInfo defFixities singleSite 
     check <- useOrFail state "Retrie.TypeCheck" NoTypeCheck TypeCheck target
     targetFixities <-
       fixityEnvFor session (tmrTypechecked check) (tmrRenamed check)
-    cpp <-
+    (cpp, annPs, contents) <-
       getCPPmodule recorder state session targetFixities $
         fromNormalizedFilePath target
-    pure (check, targetFixities, cpp)
+    pure (check, targetFixities, cpp, annPs, contents)
   case inputs of
     Left err -> pure $ TargetFailed $ T.pack $ show err
-    Right (check, targetFixities, cpp) -> do
+    Right (check, targetFixities, cpp, annPs, contents) -> do
       let renameInfo = defRenameInfo <> mkRenameInfo (tmrRenamed check)
       result <-
         try @_ @SomeException $
@@ -232,7 +234,8 @@ rewriteTarget recorder state inlineRewrite defRenameInfo defFixities singleSite 
           case replacements of
             [] -> TargetSkipped
             selected ->
-              TargetEdited $ asEditMap $ asTextEdits (Change selected imports)
+              TargetEdited $ asEditMap $
+                asTextEdits target annPs contents (Change selected imports)
 
 -- | Inline a definition into every file that references it. Rewrites
 -- each target file independently and reports any that fail.
@@ -689,15 +692,51 @@ asEditMap =
     . Map.fromListWith (++)
     . map (second pure)
 
-asTextEdits :: Change -> [(Uri, TextEdit)]
-asTextEdits NoChange = []
-asTextEdits (Change reps _imports) =
+asTextEdits :: NormalizedFilePath -> GHCGHC.ParsedSource -> T.Text -> Change -> [(Uri, TextEdit)]
+asTextEdits _ _ _ NoChange = []
+asTextEdits target ps contents (Change reps imports) =
+  case replacementTextEdits reps of
+    -- 'addImports' requests imports even in files where no rewrite
+    -- fired; an untouched file must not gain them
+    []    -> []
+    edits -> edits <> importTextEdits target ps contents imports
+
+replacementTextEdits :: [Replacement] -> [(Uri, TextEdit)]
+replacementTextEdits reps =
   [ (filePathToUri spanLoc, edit)
   | Replacement{..} <- nubOrdOn (realSpan . replLocation) reps
   , (RealSrcSpan rspan _) <- [replLocation]
   , let spanLoc = unpackFS $ srcSpanFile rspan
   , let edit = TextEdit (realSrcSpanToRange rspan) (T.pack replReplacement)
   ]
+
+-- | The imports a rewrite requested via 'addImports', as one insertion
+-- edit below the target's last import -- the same spot the refactor
+-- plugin's import actions use. Imports the target already has, and
+-- imports of the target itself, are dropped. Rendering through ppr
+-- normalises annotations away, so the rendered text doubles as the
+-- dedupe key.
+importTextEdits
+  :: NormalizedFilePath -> GHCGHC.ParsedSource -> T.Text -> [AnnotatedImports] -> [(Uri, TextEdit)]
+importTextEdits target ps contents annIs =
+  [ (filePathToUri (fromNormalizedFilePath target), TextEdit range text)
+  | not (null newImports)
+  , Just (range, indent) <- [newImportInsertRange ps contents]
+  , let sep = "\n" <> T.replicate indent " "
+        text = T.intercalate sep newImports <> sep
+  ]
+  where
+    L _ hsmod = ps
+    render = printOutputable . unLoc
+    existing = Set.fromList (map render (GHCGHC.hsmodImports hsmod))
+    selfName = unLoc <$> GHCGHC.hsmodName hsmod
+    newImports =
+      nubOrd
+        [ render i
+        | i <- concatMap astA annIs
+        , Just (unLoc (ideclName (unLoc i))) /= selfName
+        , not (render i `Set.member` existing)
+        ]
 
 -------------------------------------------------------------------------------
 -- Rule wrappers
@@ -719,7 +758,10 @@ _useRuleStale label state rule f =
 -- | Chosen approach for calling ghcide Shake rules
 useRule label = _useRuleStale ("Retrie." <> label)
 
-getCPPmodule :: Recorder (WithPriority Log) -> IdeState -> HscEnv -> FixityEnv -> FilePath -> IO (CPP AnnotatedModule)
+-- | The retrie view of a target file, together with the inputs
+-- 'importTextEdits' needs to place new imports: the real-span parse
+-- and the current file contents.
+getCPPmodule :: Recorder (WithPriority Log) -> IdeState -> HscEnv -> FixityEnv -> FilePath -> IO (CPP AnnotatedModule, GHCGHC.ParsedSource, T.Text)
 getCPPmodule recorder state session fixities t = do
   -- TODO: is it safe to drop this makeAbsolute?
   let nt = toNormalizedFilePath' $ (toAbsolute $ rootDir state) t
@@ -744,8 +786,11 @@ getCPPmodule recorder state session fixities t = do
     case mbContentsVFS of
       Just contents -> return $ Rope.toText contents
       Nothing       -> T.decodeUtf8 <$> BS.readFile (fromNormalizedFilePath nt)
-  if any (T.isPrefixOf "#if" . T.toLower) (T.lines contents)
-    then parseCPP getParsedModule contents
-    else do
-      pm <- useOrFail state "Retrie.GetParsedModule" NoParse GetParsedModule nt
-      NoCPP <$> transformA (fixAnns pm) (fix fixities)
+  cpp <-
+    if any (T.isPrefixOf "#if" . T.toLower) (T.lines contents)
+      then parseCPP getParsedModule contents
+      else do
+        pm <- useOrFail state "Retrie.GetParsedModule" NoParse GetParsedModule nt
+        NoCPP <$> transformA (fixAnns pm) (fix fixities)
+  annPs <- useOrFail state "Retrie.GetAnnotatedParsedSource" NoParse GetAnnotatedParsedSource nt
+  pure (cpp, annPs, contents)
