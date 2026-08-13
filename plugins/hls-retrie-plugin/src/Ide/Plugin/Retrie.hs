@@ -58,7 +58,8 @@ import           Development.IDE.GHC.Compat           (GRHSs (GRHSs),
                                                        pattern RealSrcSpan,
                                                        pm_parsed_source,
                                                        srcSpanFile,
-                                                       stringToUnit, unLoc)
+                                                       stringToUnit, topDir,
+                                                       unLoc)
 import qualified Development.IDE.GHC.Compat           as GHC
 import           Development.IDE.GHC.Compat.Util      hiding (catch, try)
 import           Development.IDE.GHC.ExactPrint       (GetAnnotatedParsedSource (GetAnnotatedParsedSource),
@@ -92,8 +93,9 @@ import           Retrie                               (Annotated (astA),
                                                        applyWithRenameInfo,
                                                        mkRenameInfo)
 import           Retrie.CPP                           (CPP (NoCPP), parseCPP)
-import           Retrie.ExactPrint                    (fix, makeDeltaAst,
-                                                       transformA, unsafeMkA)
+import           Retrie.ExactPrint                    (exactPrint, fix,
+                                                       makeDeltaAst, transformA,
+                                                       unsafeMkA)
 import           Retrie.Expr                          (mkLocatedHsVar)
 import           Retrie.Fixity                        (FixityEnv)
 import           Retrie.Monad                         (runRetrie)
@@ -111,14 +113,20 @@ import           Data.Maybe                           (isNothing)
 import           Ide.Plugin.Retrie.Dispatch           (dispatchRewrites,
                                                        triviallySelectable)
 import           Ide.Plugin.Retrie.Fixity
+import           Ide.Plugin.Retrie.Imports            (DefScope, mkDefScope,
+                                                       mkTargetScope,
+                                                       requalifyRewrite)
+import           Ide.Plugin.Retrie.Transformer        (restrictToSite)
 
 data Log
   = LogParsingModule FilePath
+  | LogImportRefused String
   | forall a. Pretty a => LogResolve a
 
 instance Pretty Log where
   pretty = \case
     LogParsingModule fp -> "Parsing module:" <+> pretty fp
+    LogImportRefused reason -> "Inline refused by import resolution:" <+> pretty reason
     LogResolve l        -> pretty l
 
 descriptor :: Recorder (WithPriority Log) -> PluginId -> PluginDescriptor IdeState
@@ -186,6 +194,9 @@ rewriteTarget
   -> RenameInfo
   -- ^ Rename info of the defining module; combined with the target's
   -- own so spliced names render in a form valid at the target.
+  -> DefScope
+  -- ^ Scope view of the defining module, resolving the names the
+  -- inlined body references and where they can be imported from.
   -> FixityEnv
   -- ^ Fixities of the operators the defining module uses. Fixities of
   -- imported operators (Prelude's included) are not in a module's own
@@ -195,7 +206,7 @@ rewriteTarget
   -- 'Nothing': rewrite every call site in the file.
   -> NormalizedFilePath
   -> IO TargetOutcome
-rewriteTarget recorder state inlineRewrite defRenameInfo defFixities singleSite target = do
+rewriteTarget recorder state inlineRewrite defRenameInfo defScope defFixities singleSite target = do
   inputs <- try @_ @SomeException $ do
     session <-
       hscEnv
@@ -211,26 +222,32 @@ rewriteTarget recorder state inlineRewrite defRenameInfo defFixities singleSite 
     (cpp, annPs, contents) <-
       getCPPmodule recorder state session targetFixities $
         fromNormalizedFilePath target
-    pure (check, targetFixities, cpp, annPs, contents)
+    pure (session, check, targetFixities, cpp, annPs, contents)
   case inputs of
     Left err -> pure $ TargetFailed $ T.pack $ show err
-    Right (check, targetFixities, cpp, annPs, contents) -> do
+    Right (session, check, targetFixities, cpp, annPs, contents) -> do
       let renameInfo = defRenameInfo <> mkRenameInfo (tmrRenamed check)
+          -- rewrite the templates using the import spellings in the target
+          requalified =
+            map
+              (maybe id restrictToSite singleSite
+                . requalifyRewrite
+                    (logWith recorder Debug . LogImportRefused)
+                    (topDir (GHC.hsc_dflags session))
+                    defScope
+                    (mkTargetScope check))
+              inlineRewrite
       result <-
         try @_ @SomeException $
           runRetrie
             (defFixities <> targetFixities)
-            (applyWithRenameInfo renameInfo inlineRewrite)
+            (applyWithRenameInfo renameInfo requalified)
             cpp
       pure $ case result of
         Left err ->
           TargetFailed $ "Retrie - crashed with: " <> T.pack (show err)
         Right (_, _, NoChange) -> TargetSkipped
         Right (_, _, Change replacements imports) ->
-          -- When a single site was requested, 'requalifyRewrite'
-          -- already refused every match not containing it, so each
-          -- replacement here is that site's. No imports either when
-          -- nothing was spliced in.
           case replacements of
             [] -> TargetSkipped
             selected ->
@@ -286,6 +303,7 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
           state
           inlineRewrite
           defRenameInfo
+          defScope
           (fmFixities defMod)
           intoRange
           target
@@ -305,7 +323,9 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
                 | target /= nfpSource
                 , target `elem` refFiles ->
                     [ "no call site could be rewritten; bindings there"
-                        <> " may capture variables of the inlined body"
+                        <> " may capture variables of the inlined body,"
+                        <> " or the body may reference names that cannot"
+                        <> " be imported there"
                     ]
               _ -> []
           ]
@@ -723,7 +743,7 @@ importTextEdits target ps contents annIs =
   | not (null newImports)
   , Just (range, indent) <- [newImportInsertRange ps contents]
   , let sep = "\n" <> T.replicate indent " "
-        text = T.intercalate sep newImports <> sep
+        text = T.intercalate sep (map snd newImports) <> sep
   ]
   where
     L _ hsmod = ps
@@ -731,12 +751,19 @@ importTextEdits target ps contents annIs =
     existing = Set.fromList (map render (GHCGHC.hsmodImports hsmod))
     selfName = unLoc <$> GHCGHC.hsmodName hsmod
     newImports =
-      nubOrd
-        [ render i
+      nubOrdOn fst
+        [ (render i, importText i)
         | i <- concatMap astA annIs
         , Just (unLoc (ideclName (unLoc i))) /= selfName
         , not (render i `Set.member` existing)
         ]
+    -- A declaration that came in with a real span was parsed, so it
+    -- exact-prints with its idiomatic spacing ("import M (f)"); a
+    -- generated span means the declaration was built programmatically
+    -- without annotations ('toImportDecl') and only ppr can render it.
+    importText i = case GHC.getLocA i of
+      RealSrcSpan _ _ -> T.strip (T.pack (exactPrint i))
+      _               -> render i
 
 -------------------------------------------------------------------------------
 -- Rule wrappers

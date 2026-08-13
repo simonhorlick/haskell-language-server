@@ -710,6 +710,9 @@ library hls-retrie-plugin
   other-modules:
     Ide.Plugin.Retrie.Dispatch
     Ide.Plugin.Retrie.Fixity
+    Ide.Plugin.Retrie.GHC
+    Ide.Plugin.Retrie.Imports
+    Ide.Plugin.Retrie.Transformer
   hs-source-dirs:   plugins/hls-retrie-plugin/src
   build-depends:
     , aeson
