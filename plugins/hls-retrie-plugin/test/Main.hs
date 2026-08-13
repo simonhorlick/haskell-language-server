@@ -93,6 +93,7 @@ inlineThisTests =
       , testCommand "respells to the target's qualified spelling" "QualifiedScopeUse" 6 4
       , testCommand "import qualified" "QualifiedBodyUse" 5 4
       , testCommand "reject if required import isn't exported" "CrossModuleNotExportedUse" 4 4
+      , testCommand "built-in syntax splices without an import" "BuiltinSyntax" 6 4
       ]
     , testGroup "inline everywhere"
       [ testEverywhere "rewrites all call sites in the module" "Everywhere" 6 4

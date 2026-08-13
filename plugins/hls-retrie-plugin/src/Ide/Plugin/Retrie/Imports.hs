@@ -57,7 +57,8 @@ import           Development.IDE.GHC.Compat       (GenLocated (L), GhcPs,
 import qualified Development.IDE.GHC.Compat       as GHC
 import qualified GHC                              as GHCGHC
 import           GHC.Data.FastString              (FastString)
-import           GHC.Types.Name                   (isInternalName)
+import           GHC.Types.Name                   (isBuiltInSyntax,
+                                                   isInternalName)
 import           GHC.Types.Name.Occurrence        (isSymOcc)
 import           GHC.Types.Name.Reader            (GlobalRdrEnv,
                                                    globalRdrEnvElts,
@@ -188,7 +189,10 @@ requalifyTemplate def tgt ast =
               Nothing ->
                 refuse $ "unresolvable occurrence " ++ showRdr rdr
               Just name
-                | isInternalName name -> pure lrdr
+                -- Built-in syntax ([], (:), tuples) is always in
+                -- scope and never importable; no 'GlobalRdrEnv' has
+                -- an entry for it, so it must splice verbatim.
+                | isInternalName name || isBuiltInSyntax name -> pure lrdr
                 | otherwise -> L l <$> resolveExternal rdr name
       _ -> pure lrdr
 
