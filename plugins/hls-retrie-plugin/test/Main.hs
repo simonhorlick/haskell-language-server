@@ -74,6 +74,7 @@ inlineThisTests =
       , expectFailBecause "rn" $ testCommand "refuses a site where a where-binding would capture a free variable" "CaptureWhere" 9 6
       , expectFailBecause "rn" $ testCommand "refuses a capturing site when the capture is via the argument" "ArgRename" 11 6
       , expectFailBecause "rn" $ testCommand "qualified" "Qualified" 5 6
+      , testCommand "multi-line body at a deeper call site" "LayoutDeep" 13 8
       ]
     ]
 
