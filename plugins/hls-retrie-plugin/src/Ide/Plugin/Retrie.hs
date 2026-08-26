@@ -51,6 +51,7 @@ import           Development.IDE.GHC.Compat           (GRHSs (GRHSs),
                                                        ModSummary (ms_hspp_buf),
                                                        ParsedModule, fun_id,
                                                        moduleNameString,
+                                                       ms_hspp_opts,
                                                        nameModule_maybe,
                                                        nameOccName,
                                                        occNameString,
@@ -72,6 +73,7 @@ import           GHC.Generics                         (Generic)
 import           GHC.Iface.Ext.Types                  (BindType (..),
                                                        ContextInfo (..),
                                                        identInfo)
+import qualified GHC.LanguageExtensions.Type          as LangExt (Extension (..))
 import           GHC.Types.Name                       (isVarName)
 import           GHC.Types.Name.Occurrence            (mkVarOcc)
 import           HieDb                                ((:.) (..))
@@ -810,8 +812,10 @@ getCPPmodule recorder state session fixities t = do
     T.decodeUtf8 <$> runAction "Retrie.GetFileContents" state (getSourceFileSource nt)
 
   pm <- useOrFail state "Retrie.GetParsedModule" NoParse GetParsedModule nt
+
+  let usesCpp = GHC.xopt LangExt.Cpp (ms_hspp_opts (GHC.pm_mod_summary pm))
   cpp <-
-    if any (T.isPrefixOf "#if" . T.toLower) (T.lines contents)
+    if usesCpp
       then parseCPP getParsedModule contents
       else NoCPP <$> transformA (fixAnns pm) (fix fixities)
   pure (cpp, GHC.pm_parsed_source pm, contents)
