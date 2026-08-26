@@ -26,7 +26,6 @@ import           Control.Monad.Trans.Maybe            (MaybeT)
 import           Data.Aeson                           (FromJSON (..),
                                                        ToJSON (..))
 import           Data.Bifunctor                       (second)
-import qualified Data.ByteString                      as BS
 import           Data.Data
 import qualified Data.HashSet                         as Set
 import           Data.List.Extra                      (nubOrd, nubOrdOn, sortOn)
@@ -34,11 +33,11 @@ import qualified Data.Map                             as Map
 import           Data.Monoid                          (First (First))
 import qualified Data.Text                            as T
 import qualified Data.Text.Encoding                   as T
-import qualified Data.Text.Utf16.Rope.Mixed           as Rope
 import           Development.IDE                      hiding (pluginHandlers)
 import           Development.IDE.Core.Actions         (lookupMod)
 import           Development.IDE.Core.PluginUtils
 import           Development.IDE.Core.PositionMapping
+import           Development.IDE.Core.Rules           (getSourceFileSource)
 import           Development.IDE.Core.Shake           (ShakeExtras (ShakeExtras),
                                                        hiedbWriter, withHieDb)
 import           Development.IDE.GHC.Compat           (GRHSs (GRHSs),
@@ -807,12 +806,8 @@ getCPPmodule recorder state session fixities t = do
             `catch` \e -> throwIO (GHCParseError nt (show @SomeException e))
         transformA (fixAnns parsed) (fix fixities)
 
-  contents <- do
-    mbContentsVFS <-
-      runAction "Retrie.GetFileContents" state $ getFileContents nt
-    case mbContentsVFS of
-      Just contents -> return $ Rope.toText contents
-      Nothing       -> T.decodeUtf8 <$> BS.readFile (fromNormalizedFilePath nt)
+  contents <-
+    T.decodeUtf8 <$> runAction "Retrie.GetFileContents" state (getSourceFileSource nt)
   cpp <-
     if any (T.isPrefixOf "#if" . T.toLower) (T.lines contents)
       then parseCPP getParsedModule contents

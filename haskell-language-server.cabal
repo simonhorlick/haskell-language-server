@@ -716,7 +716,6 @@ library hls-retrie-plugin
   hs-source-dirs:   plugins/hls-retrie-plugin/src
   build-depends:
     , aeson
-    , bytestring
     , containers
     , extra
     , filepath
@@ -736,7 +735,6 @@ library hls-retrie-plugin
     , stm
     , syb
     , text
-    , text-rope
     , transformers
     , unordered-containers
 
