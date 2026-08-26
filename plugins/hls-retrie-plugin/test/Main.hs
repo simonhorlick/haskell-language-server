@@ -150,6 +150,9 @@ inlineThisTests =
             , "r :: Int", "r = e 5", "  where y = 100"
             ]
       ]
+    , testGroup "cpp"
+      [ testCommand "a '#'-led line in a non-CPP module is not a directive" "LabelLine" 15 6
+      ]
     , dispatchTest $ testGroup "dispatch"
       [ testCommand "dispatch multi clause" "MultiClause" 7 4
       , testCommand "transfer guards to case" "Guards" 9 4
