@@ -808,11 +808,10 @@ getCPPmodule recorder state session fixities t = do
 
   contents <-
     T.decodeUtf8 <$> runAction "Retrie.GetFileContents" state (getSourceFileSource nt)
+
+  pm <- useOrFail state "Retrie.GetParsedModule" NoParse GetParsedModule nt
   cpp <-
     if any (T.isPrefixOf "#if" . T.toLower) (T.lines contents)
       then parseCPP getParsedModule contents
-      else do
-        pm <- useOrFail state "Retrie.GetParsedModule" NoParse GetParsedModule nt
-        NoCPP <$> transformA (fixAnns pm) (fix fixities)
-  annPs <- useOrFail state "Retrie.GetAnnotatedParsedSource" NoParse GetAnnotatedParsedSource nt
-  pure (cpp, annPs, contents)
+      else NoCPP <$> transformA (fixAnns pm) (fix fixities)
+  pure (cpp, GHC.pm_parsed_source pm, contents)
