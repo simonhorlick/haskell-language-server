@@ -160,6 +160,8 @@ inlineThisTests =
       , testCommand "multi clause partial" "MultiClausePartial" 8 8
       , testCommand "dispatch wildcard argument" "RecordWildCards2" 14 6
       , testCommand "dispatch wildcard construction from parameters" "RecordWildCardsConstruct" 10 4
+      , expectFailBecause "a statically matching constructor argument is not reduced" $
+          testCommand "single clause pattern" "Pattern" 5 4
       ]
     ]
 -- | Dispatch-preserving rewrites need the GHC >= 9.12 exact-print
