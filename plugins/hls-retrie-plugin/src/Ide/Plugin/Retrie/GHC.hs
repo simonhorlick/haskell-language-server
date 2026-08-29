@@ -2,20 +2,22 @@
 -- | Version-independent views of GHC's 'GlobalRdrEnv'.
 module Ide.Plugin.Retrie.GHC
   ( lookupGRERdr
+  , lookupGREName
   , lookupFieldGREs
+  , greIsParentless
   , greImportModule
   , greImportQualifier
   , greParentOcc
   ) where
 
-import           Development.IDE.GHC.Compat (ImportSpec, ModuleName, OccName,
-                                             RdrName, gre_par, moduleName,
-                                             nameOccName)
+import           Development.IDE.GHC.Compat (ImportSpec, ModuleName, Name,
+                                             OccName, RdrName, gre_par,
+                                             moduleName, nameOccName)
 import           GHC.Data.FastString        (FastString)
 import           GHC.Types.Name.Occurrence  (mkVarOccFS)
 import           GHC.Types.Name.Reader      (GlobalRdrElt, GlobalRdrEnv,
-                                             Parent (ParentIs), isRecFldGRE,
-                                             is_as, is_decl)
+                                             Parent (..), isRecFldGRE, is_as,
+                                             is_decl)
 import qualified GHC.Types.Name.Reader      as RdrName
 
 #if MIN_VERSION_ghc(9,8,0)
@@ -34,6 +36,17 @@ lookupGRERdr env rdr = RdrName.lookupGRE env (LookupRdrName rdr SameNameSpace)
 #else
 lookupGRERdr env rdr = RdrName.lookupGRE_RdrName rdr env
 #endif
+
+-- | The 'GlobalRdrElt' a resolved name is in scope as, if any.
+lookupGREName :: GlobalRdrEnv -> Name -> Maybe GlobalRdrElt
+lookupGREName = RdrName.lookupGRE_Name
+
+-- | Whether a name is a plain top-level binding rather than a class
+-- method, record field or constructor, which live under a parent.
+greIsParentless :: GlobalRdrElt -> Bool
+greIsParentless gre = case gre_par gre of
+  NoParent -> True
+  _        -> False
 
 -- | The record fields a label is in scope for. Fields live in their
 -- own namespace from 9.8 on; the variable-namespace lookup asks for

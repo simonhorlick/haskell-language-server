@@ -48,7 +48,7 @@ import           Development.IDE.GHC.Compat           (GRHSs (GRHSs),
                                                        HsValBindsLR (..),
                                                        HscEnv, ImportDecl (..),
                                                        LHsExpr,
-                                                       ModSummary (ms_hspp_buf),
+                                                       ModSummary (ModSummary, ms_hspp_buf, ms_mod),
                                                        ParsedModule, fun_id,
                                                        moduleNameString,
                                                        ms_hspp_opts,
@@ -70,12 +70,11 @@ import           Development.IDE.Spans.AtPoint        (LookupModule,
 import           Development.IDE.Types.Shake          (WithHieDb)
 import qualified GHC                                  as GHCGHC
 import           GHC.Generics                         (Generic)
-import           GHC.Iface.Ext.Types                  (BindType (..),
-                                                       ContextInfo (..),
-                                                       identInfo)
 import qualified GHC.LanguageExtensions.Type          as LangExt (Extension (..))
-import           GHC.Types.Name                       (isVarName)
+import           GHC.Types.Name                       (isExternalName,
+                                                       isVarName)
 import           GHC.Types.Name.Occurrence            (mkVarOcc)
+import           GHC.Types.Name.Set                   (elemNameSet, mkNameSet)
 import           HieDb                                ((:.) (..))
 import qualified HieDb
 import           Ide.Plugin.Error                     (PluginError (PluginInternalError),
@@ -105,7 +104,7 @@ import           Retrie.Replace                       (Change (..),
 import           Retrie.Rewrites.Function             (matchToRewrites)
 import           System.FilePath                      (takeFileName)
 
-import           Retrie.SYB                           (everything, mkQ)
+import           Retrie.SYB                           (everything, listify, mkQ)
 import           Retrie.Types
 import           Retrie.Universe                      (Universe)
 
@@ -116,6 +115,8 @@ import           Ide.Plugin.Retrie.Dispatch           (dispatchRewrites,
 import           Ide.Plugin.Retrie.Extensions         (spliceExtensions,
                                                        spliceableInto)
 import           Ide.Plugin.Retrie.Fixity
+import           Ide.Plugin.Retrie.GHC                (greIsParentless,
+                                                       lookupGREName)
 import           Ide.Plugin.Retrie.Imports            (DefScope, mkDefScope,
                                                        mkTargetScope,
                                                        requalifyRewrite)
@@ -389,7 +390,7 @@ provider state _plId (CodeActionParams _ _ (TextDocumentIdentifier uri) range ca
   let (LSP.CodeActionContext _diags _monly _) = ca
   nfp <- getNormalizedFilePathE uri
 
-  (topLevelBinds, posMapping) <-
+  (ModSummary{ms_mod}, topLevelBinds, posMapping, rdrEnv) <-
     runActionE "retrie" state $
       getBinds nfp
 
@@ -399,7 +400,7 @@ provider state _plId (CodeActionParams _ _ (TextDocumentIdentifier uri) range ca
   inlineSuggestions <-
     liftIO $
       runIdeAction "" extras $
-        suggestBindInlines nfp topLevelBinds range withHieDb (lookupMod hiedbWriter)
+        suggestBindInlines rdrEnv ms_mod topLevelBinds range withHieDb (lookupMod hiedbWriter)
   let inlineActions =
         [ mkCodeAction title CodeActionKind_RefactorInline resolveData
         | (title, resolveData) <- inlineSuggestions
@@ -423,8 +424,10 @@ getBinds
   -> ExceptT
        PluginError
        Action
-       ( [HsBindLR GhcRn GhcRn]
+       ( ModSummary
+       , [HsBindLR GhcRn GhcRn]
        , PositionMapping
+       , GHC.GlobalRdrEnv
        )
 getBinds nfp = do
   (tm, posMapping) <- useWithStaleE TypeCheck nfp
@@ -448,26 +451,24 @@ getBinds nfp = do
             , L _ decl <- bagToList bagBinds
 #endif
             ]
-      return (topLevelBinds, posMapping)
+      return (tmrModSummary tm, topLevelBinds, posMapping, GHC.tcg_rdr_env (tmrTypechecked tm))
 
 -- | Inline suggestions for the request range: identifiers used in a
 -- RHS for which we have a source definition, and the names bindings
 -- define (top-level or bound in a where clause or let block), which
--- offer inlining the definition into its call sites. Identifiers the
--- module's own HIE occurrences show to be bound by something other
--- than a function equation (parameters, pattern binders, record
--- selectors) are not offered; see 'hasFunBindOccurrence'.
+-- offer inlining the definition into its call sites. Identifiers not
+-- bound by a function equation (parameters, pattern binders, record
+-- selectors, class methods) are not offered; see 'inlinableName'.
 suggestBindInlines
-  :: NormalizedFilePath
+  :: GHC.GlobalRdrEnv
+  -> GHC.Module
   -> [HsBindLR GhcRn GhcRn]
   -> Range
   -> WithHieDb
   -> (FilePath -> GHCGHC.ModuleName -> GHCGHC.Unit -> Bool -> MaybeT IdeAction Uri)
   -> IdeAction [(T.Text, RetrieResolveData)]
-suggestBindInlines nfp binds range hie lookupMod = do
-  mbHar <- useWithStaleFast GetHieAst nfp
-  let funBindLocally = maybe (const True) (hasFunBindOccurrence . fst) mbHar
-  identifiers <- definedIdentifiers funBindLocally
+suggestBindInlines rdrEnv thisMod binds range hie lookupMod = do
+  identifiers <- definedIdentifiers (inlinableName rdrEnv thisMod binds)
   return $
     concatMap suggestions (Set.toList identifiers)
       <> concatMap binderSuggestions (Set.toList binderIdentifiers)
@@ -574,48 +575,22 @@ suggestBindInlines nfp binds range hie lookupMod = do
                   mbSrcLocation
         _ -> pure mempty
 
--- | Whether inlining may be offered for a name, judged from the
--- module's own HIE occurrences. A name bound in this module is
--- inlinable only when it is bound by a function equation ('FunBind'):
--- its binding occurrence carries @ValBind RegularBind@. Parameters
--- and lambda\/case\/do\/pattern binders carry only 'PatternBind',
--- record selectors carry 'RecField' contexts alongside the 'ValBind'
--- of their generated selector, and class\/instance methods never
--- carry @RegularBind@ -- none of these have an equation the rewrite
--- could splice, so an offer could only fail at resolve. A name with
--- no binding occurrence here is imported and is accepted: only
--- top-level bindings are visible across modules, so the parameter
--- case cannot arise, and the definition's shape is checked when the
--- rewrite is built from the defining module.
-hasFunBindOccurrence :: HieAstResult -> GHC.Name -> Bool
-hasFunBindOccurrence HAR{refMap} name =
-  case Map.lookup (Right name) refMap of
-    Nothing -> True
-    Just occurrences ->
-      let bindingOccs =
-            [ info
-            | (_, details) <- occurrences
-            , let info = identInfo details
-            , any isBindingCtx info
-            ]
-       in null bindingOccs || any isFunBindOcc bindingOccs
+-- | Whether inlining may be offered for a name: it is bound by a
+-- function equation in this module ('FunBind', top-level or nested),
+-- or imported as a plain top-level binding. Parameters, pattern
+-- binders, record selectors, class methods and constructors have no
+-- equation the rewrite could splice, so an offer could only fail at
+-- resolve.
+inlinableName :: GHC.GlobalRdrEnv -> GHC.Module -> [HsBindLR GhcRn GhcRn] -> GHC.Name -> Bool
+inlinableName rdrEnv thisMod binds = \name ->
+  name `elemNameSet` localFunBinds
+    || (isExternalName name && GHC.nameModule name /= thisMod && importedFunction name)
   where
-    isBindingCtx = \case
-      ValBind{}     -> True
-      PatternBind{} -> True
-      TyVarBind{}   -> True
-      ClassTyDecl{} -> True
-      Decl{}        -> True
-      MatchBind     -> True
-      _             -> False
-    isFunBindOcc info =
-      any isRegularValBind info && not (any isRecField info)
-    isRegularValBind = \case
-      ValBind RegularBind _ _ -> True
-      _                       -> False
-    isRecField = \case
-      RecField{} -> True
-      _          -> False
+    localFunBinds = mkNameSet [unLoc fun_id | FunBind{fun_id} <- listify isFunBind binds]
+    isFunBind :: HsBindLR GhcRn GhcRn -> Bool
+    isFunBind FunBind{} = True
+    isFunBind _         = False
+    importedFunction = maybe False greIsParentless . lookupGREName rdrEnv
 
 -- | The module and unit an identifier comes from, when it has one:
 -- locally bound names have none.
