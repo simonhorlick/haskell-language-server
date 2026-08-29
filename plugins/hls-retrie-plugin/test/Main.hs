@@ -158,6 +158,9 @@ inlineThisTests =
             , "r :: Int", "r = e 5", "  where y = 100"
             ]
       ]
+    , testGroup "extensions"
+      [ testCommand "refuses a QuasiQuotes body into a module without the extension" "QuasiQuoteUse" 5 14
+      ]
     , testGroup "cpp"
       [ testCommand "a '#'-led line in a non-CPP module is not a directive" "LabelLine" 15 6
       ]

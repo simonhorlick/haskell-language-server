@@ -113,6 +113,8 @@ import           Retrie.Universe                      (Universe)
 import           Data.Maybe                           (isNothing)
 import           Ide.Plugin.Retrie.Dispatch           (dispatchRewrites,
                                                        triviallySelectable)
+import           Ide.Plugin.Retrie.Extensions         (spliceExtensions,
+                                                       spliceableInto)
 import           Ide.Plugin.Retrie.Fixity
 import           Ide.Plugin.Retrie.Imports            (DefScope, mkDefScope,
                                                        mkTargetScope,
@@ -177,9 +179,8 @@ data TargetOutcome
   | TargetSkipped
     -- ^ No requested call site in the file; nothing to edit.
   | TargetNotRewritable T.Text
-    -- ^ A requested site was matched but produced no edit -- retrie
-    -- refuses a site when a binding there would capture a variable of
-    -- the inlined body. The file must be left unchanged.
+    -- ^ The target cannot take the splice (it lacks an extension the
+    -- body needs). The file must be left unchanged.
   | TargetFailed T.Text
     -- ^ The target could not be processed at all.
 
@@ -192,6 +193,8 @@ rewriteTarget
   -> IdeState
   -> [Rewrite Universe]
   -- ^ The inline rewrite, built from the defining module.
+  -> [LangExt.Extension]
+  -- ^ Extensions the rewrite's templates need enabled in the target.
   -> RenameInfo
   -- ^ Rename info of the defining module; combined with the target's
   -- own so spliced names render in a form valid at the target.
@@ -207,7 +210,7 @@ rewriteTarget
   -- 'Nothing': rewrite every call site in the file.
   -> NormalizedFilePath
   -> IO TargetOutcome
-rewriteTarget recorder state inlineRewrite defRenameInfo defScope defFixities singleSite target = do
+rewriteTarget recorder state inlineRewrite neededExts defRenameInfo defScope defFixities singleSite target = do
   inputs <- try @_ @SomeException $ do
     session <-
       hscEnv
@@ -226,7 +229,10 @@ rewriteTarget recorder state inlineRewrite defRenameInfo defScope defFixities si
     pure (session, check, targetFixities, cpp, annPs, contents)
   case inputs of
     Left err -> pure $ TargetFailed $ T.pack $ show err
-    Right (session, check, targetFixities, cpp, annPs, contents) -> do
+    Right (session, check, targetFixities, cpp, annPs, contents)
+      | Left reason <- spliceableInto neededExts (mkTargetScope check) ->
+          pure $ TargetNotRewritable $ T.pack reason
+      | otherwise -> do
       let renameInfo = defRenameInfo <> mkRenameInfo (tmrRenamed check)
           -- rewrite the templates using the import spellings in the target
           requalified =
@@ -286,6 +292,12 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
         PluginInternalError
           "no inline rewrite could be built; the document may have changed"
 
+    let neededExts =
+          spliceExtensions
+            [ astA (tTemplate t)
+            | Query{qResult = (t, _)} <- inlineRewrite
+            ]
+
     refFiles <- case (inlineAllModuleName, inlineAllUnitId) of
       (Just modName, Just unit)
         | isNothing inlineAllIntoThisLocation ->
@@ -303,6 +315,7 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
           recorder
           state
           inlineRewrite
+          neededExts
           defRenameInfo
           defScope
           (fmFixities defMod)

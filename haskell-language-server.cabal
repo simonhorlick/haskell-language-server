@@ -709,6 +709,7 @@ library hls-retrie-plugin
   exposed-modules:  Ide.Plugin.Retrie
   other-modules:
     Ide.Plugin.Retrie.Dispatch
+    Ide.Plugin.Retrie.Extensions
     Ide.Plugin.Retrie.Fixity
     Ide.Plugin.Retrie.GHC
     Ide.Plugin.Retrie.Imports

@@ -30,7 +30,7 @@
 module Ide.Plugin.Retrie.Imports
   ( DefScope
   , mkDefScope
-  , TargetScope
+  , TargetScope (..)
   , mkTargetScope
   , requalifyRewrite
   ) where
@@ -57,7 +57,6 @@ import           Development.IDE.GHC.Compat       (GenLocated (L), GhcPs,
 import qualified Development.IDE.GHC.Compat       as GHC
 import qualified GHC                              as GHCGHC
 import           GHC.Data.EnumSet                 (EnumSet)
-import qualified GHC.Data.EnumSet                 as EnumSet
 import           GHC.Data.FastString              (FastString, unpackFS)
 import           GHC.Types.Name                   (isBuiltInSyntax,
                                                    isInternalName)
@@ -207,12 +206,9 @@ requalifyTemplate def tgt ast =
     -- is only solved when the field's selector is in scope at the use
     -- site. Which record the label picked is a typing matter, so every
     -- field the defining module has in scope under the label must be
-    -- in scope in the target. The splice is printed, not reparsed, so
-    -- the target also needs the extension.
+    -- in scope in the target.
     dotField :: GHCGHC.DotFieldOcc GhcPs -> RequalM (GHCGHC.DotFieldOcc GhcPs)
     dotField dfo@GHCGHC.DotFieldOcc{dfoLabel = L _ (FieldLabelString lbl)}
-      | not (GHC.OverloadedRecordDot `EnumSet.member` tsExtensions tgt) =
-          refuse "record-dot syntax is not enabled in the target"
       | null defFields =
           refuse $ "no record field " ++ unpackFS lbl ++ " in scope in the defining module"
       | all (`elem` tgtFields) defFields = pure dfo
