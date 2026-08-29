@@ -79,6 +79,8 @@ inlineThisTests =
       , testCommand "backtick section applied to its remaining argument" "SectionApp" 6 8
       , testCommand "list use" "ListLiteral" 6 5
       , testCommand "parens around a right-associative body on the LHS" "RightAssocOp" 10 4
+      , expectFailBecause "section operators contribute no fixity" $
+          testCommand "section operator keeps its fixity" "SectionFixity" 9 5
       , testCommand "where to let" "Where2" 6 6
       , testCommand "where to let annotation" "Where3" 7 6
       , testCommand "substitutes arguments into the where clause" "Where5" 6 4
