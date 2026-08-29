@@ -76,6 +76,7 @@ inlineThisTests =
       , testCommand "let capture" "LetCapture" 5 36
       , testCommand "rename let binding" "Capture" 7 6
       , testCommand "infix with extra arguments" "InfixExtraArg" 8 8
+      , testCommand "backtick section applied to its remaining argument" "SectionApp" 6 8
       , testCommand "list use" "ListLiteral" 6 5
       , testCommand "parens around a right-associative body on the LHS" "RightAssocOp" 10 4
       , testCommand "where to let" "Where2" 6 6
