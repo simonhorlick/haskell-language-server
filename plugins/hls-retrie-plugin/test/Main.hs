@@ -58,6 +58,9 @@ inlineThisTests =
       , testProvider "imported constructor in a pattern" "ConUse" 9 2 []
       , testProvider "parameter" "NotInlinable" 5 12 []
       , testProvider "record selector" "NotInlinable" 5 6 []
+      , testProvider "imported record selector" "ImportedNotInlinable" 5 6 []
+      , expectFailBecause "imported names are admitted without a binding-shape check" $
+          testProvider "imported class method" "ImportedNotInlinable" 8 6 []
       , testProvider "pattern-bound variable" "NotInlinable" 5 16 []
       , testProvider "where binder beside non-inlinables" "NotInlinable" 5 20 ["Inline y", "Inline y everywhere"]
       , testProvider "operator" "Operator" 4 16 ["Inline */", "Inline */ everywhere"]
