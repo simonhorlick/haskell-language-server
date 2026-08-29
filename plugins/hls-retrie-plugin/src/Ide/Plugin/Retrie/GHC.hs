@@ -2,6 +2,7 @@
 -- | Version-independent views of GHC's 'GlobalRdrEnv'.
 module Ide.Plugin.Retrie.GHC
   ( lookupGRERdr
+  , lookupFieldGREs
   , greImportModule
   , greImportQualifier
   , greParentOcc
@@ -10,13 +11,19 @@ module Ide.Plugin.Retrie.GHC
 import           Development.IDE.GHC.Compat (ImportSpec, ModuleName, OccName,
                                              RdrName, gre_par, moduleName,
                                              nameOccName)
+import           GHC.Data.FastString        (FastString)
+import           GHC.Types.Name.Occurrence  (mkVarOccFS)
 import           GHC.Types.Name.Reader      (GlobalRdrElt, GlobalRdrEnv,
-                                             Parent (ParentIs), is_as, is_decl)
+                                             Parent (ParentIs), isRecFldGRE,
+                                             is_as, is_decl)
 import qualified GHC.Types.Name.Reader      as RdrName
 
 #if MIN_VERSION_ghc(9,8,0)
-import           GHC.Types.Name.Reader      (LookupGRE (..),
-                                             WhichGREs (SameNameSpace))
+import           GHC.Types.Name.Reader      (FieldsOrSelectors (WantField),
+                                             LookupGRE (..),
+                                             WhichGREs (RelevantGREsFOS, SameNameSpace))
+#else
+import           GHC.Types.Name.Reader      (mkRdrUnqual)
 #endif
 
 -- | Every 'GlobalRdrElt' a spelling resolves to in the scope, within
@@ -26,6 +33,19 @@ lookupGRERdr :: GlobalRdrEnv -> RdrName -> [GlobalRdrElt]
 lookupGRERdr env rdr = RdrName.lookupGRE env (LookupRdrName rdr SameNameSpace)
 #else
 lookupGRERdr env rdr = RdrName.lookupGRE_RdrName rdr env
+#endif
+
+-- | The record fields a label is in scope for. Fields live in their
+-- own namespace from 9.8 on; the variable-namespace lookup asks for
+-- them explicitly.
+lookupFieldGREs :: GlobalRdrEnv -> FastString -> [GlobalRdrElt]
+#if MIN_VERSION_ghc(9,8,0)
+lookupFieldGREs env lbl =
+  filter isRecFldGRE $
+    RdrName.lookupGRE env (LookupOccName (mkVarOccFS lbl) (RelevantGREsFOS WantField))
+#else
+lookupFieldGREs env lbl =
+  filter isRecFldGRE $ RdrName.lookupGRE_RdrName (mkRdrUnqual (mkVarOccFS lbl)) env
 #endif
 
 -- | The import-facing module an 'ImportSpec' brought a name in from

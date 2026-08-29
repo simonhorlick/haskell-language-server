@@ -98,6 +98,10 @@ inlineThisTests =
       , testCommand "import qualified" "QualifiedBodyUse" 5 4
       , testCommand "reject if required import isn't exported" "CrossModuleNotExportedUse" 4 4
       , testCommand "built-in syntax splices without an import" "BuiltinSyntax" 6 4
+      , testCommand "record-dot body with the field in scope" "RecordDot" 9 6
+      , testCommand "record-dot body with the field imported" "RecordDotImported" 9 4
+      , testCommand "refuses a record-dot body when the field is not in scope" "RecordDotUse" 7 4
+      , testCommand "refuses a record-dot body without the extension" "RecordDotNoExt" 6 4
       ]
     , testGroup "inline everywhere"
       [ testEverywhere "rewrites all call sites in the module" "Everywhere" 6 4

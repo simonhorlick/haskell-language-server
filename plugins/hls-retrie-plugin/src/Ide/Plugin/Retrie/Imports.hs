@@ -56,7 +56,9 @@ import           Development.IDE.GHC.Compat       (GenLocated (L), GhcPs,
                                                    rdrNameOcc)
 import qualified Development.IDE.GHC.Compat       as GHC
 import qualified GHC                              as GHCGHC
-import           GHC.Data.FastString              (FastString)
+import           GHC.Data.EnumSet                 (EnumSet)
+import qualified GHC.Data.EnumSet                 as EnumSet
+import           GHC.Data.FastString              (FastString, unpackFS)
 import           GHC.Types.Name                   (isBuiltInSyntax,
                                                    isInternalName)
 import           GHC.Types.Name.Occurrence        (isSymOcc)
@@ -65,6 +67,7 @@ import           GHC.Types.Name.Reader            (GlobalRdrEnv,
                                                    lookupGRE_Name, mkRdrQual,
                                                    mkRdrUnqual, unQualOK)
 import           GHC.Types.Name.Set               (NameSet, elemNameSet)
+import           Language.Haskell.Syntax.Basic    (FieldLabelString (..))
 
 import           Retrie                           (RenameInfo, astA)
 import           Retrie.ExactPrint                (parseImports, seedA,
@@ -107,13 +110,16 @@ mkDefScope ri tmr = DefScope
 -- | What the target module knows: which names are in scope under which
 -- spellings, and which modules its import qualifiers are bound to.
 data TargetScope = TargetScope
-  { tsGlobalEnv :: GlobalRdrEnv
-  , tsAliases   :: Map ModuleName [ModuleName]
+  { tsGlobalEnv  :: GlobalRdrEnv
+  , tsAliases    :: Map ModuleName [ModuleName]
+  , tsExtensions :: EnumSet GHC.Extension
   }
 
 mkTargetScope :: TcModuleResult -> TargetScope
 mkTargetScope tmr = TargetScope
   { tsGlobalEnv = env
+  , tsExtensions =
+      GHC.extensionFlags (GHCGHC.ms_hspp_opts (GHCGHC.pm_mod_summary (tmrParsed tmr)))
   , tsAliases =
       Map.fromListWith (++)
         [ (greImportQualifier is, [greImportModule is])
@@ -198,12 +204,23 @@ requalifyTemplate def tgt ast =
 
     -- An OverloadedRecordDot label is a 'FieldLabelString', not an
     -- 'RdrName': the renamer resolves no 'Name' for it, and HasField
-    -- is only solved when the field selector is in scope at the use
-    -- site — which we cannot arrange. Refuse rather than splice code
-    -- that may not compile in the target.
+    -- is only solved when the field's selector is in scope at the use
+    -- site. Which record the label picked is a typing matter, so every
+    -- field the defining module has in scope under the label must be
+    -- in scope in the target. The splice is printed, not reparsed, so
+    -- the target also needs the extension.
     dotField :: GHCGHC.DotFieldOcc GhcPs -> RequalM (GHCGHC.DotFieldOcc GhcPs)
-    dotField _ =
-      refuse "record-dot field access depends on the target's own scope"
+    dotField dfo@GHCGHC.DotFieldOcc{dfoLabel = L _ (FieldLabelString lbl)}
+      | not (GHC.OverloadedRecordDot `EnumSet.member` tsExtensions tgt) =
+          refuse "record-dot syntax is not enabled in the target"
+      | null defFields =
+          refuse $ "no record field " ++ unpackFS lbl ++ " in scope in the defining module"
+      | all (`elem` tgtFields) defFields = pure dfo
+      | otherwise =
+          refuse $ "record field " ++ unpackFS lbl ++ " is not in scope in the target"
+      where
+        defFields = map gre_name (lookupFieldGREs (dsGlobalEnv def) lbl)
+        tgtFields = map gre_name (lookupFieldGREs (tsGlobalEnv tgt) lbl)
 
     resolveExternal rdr name
       | s : _ <- filter unambiguous candidates = pure s
