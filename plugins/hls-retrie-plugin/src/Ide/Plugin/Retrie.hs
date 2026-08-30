@@ -109,7 +109,7 @@ import           Retrie.Types
 import           Retrie.Universe                      (Universe)
 
 
-import           Data.Maybe                           (isNothing)
+import           Data.Maybe                           (isJust, isNothing)
 import           Ide.Plugin.Retrie.Dispatch           (dispatchRewrites,
                                                        triviallySelectable)
 import           Ide.Plugin.Retrie.Extensions         (spliceExtensions,
@@ -301,7 +301,9 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
       -- requesting file can reference it
       _ -> pure []
 
-    let targets = nubOrd (tgtPath : srcPath : refFiles)
+    -- a single site lives in the requesting file; the defining file is
+    -- only a target when inlining everywhere
+    let targets = nubOrd $ tgtPath : [srcPath | isNothing iaToLocation] ++ refFiles
         neededExts =
           spliceExtensions [ astA (tTemplate t) | Query{qResult = (t, _)} <- rewrites ]
         defRenameInfo = mkRenameInfo (tmrRenamed check)
@@ -328,11 +330,19 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
           , reason <- case outcome of
               TargetNotRewritable reason -> [reason]
               TargetFailed reason        -> [reason]
-              -- the reference index says this file uses the function,
-              -- yet nothing was rewritten: its sites were refused. The
-              -- defining file is exempt -- the definition itself is
-              -- reference enough, with no call site behind it
               TargetSkipped
+                -- single site: the only target is the requesting file,
+                -- so nothing rewritten means the site was refused
+                | isJust iaToLocation ->
+                    [ "the call site was not rewritten; a binding there"
+                        <> " may capture a variable of the inlined body,"
+                        <> " or the body may reference names that cannot"
+                        <> " be imported here"
+                    ]
+                -- the reference index says this file uses the function,
+                -- yet nothing was rewritten: its sites were refused. The
+                -- defining file is exempt -- the definition itself is
+                -- reference enough, with no call site behind it
                 | target /= srcPath
                 , target `elem` refFiles ->
                     [ "no call site could be rewritten; bindings there"
