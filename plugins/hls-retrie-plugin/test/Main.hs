@@ -175,6 +175,8 @@ inlineThisTests =
       , testCommand "dispatch wildcard construction from parameters" "RecordWildCardsConstruct" 10 4
       , expectFailBecause "a statically matching constructor argument is not reduced" $
           testCommand "single clause pattern" "Pattern" 5 4
+      , expectFailBecause "the bare-reference form is spliced into infix position" $
+          testCommand "multi-clause operator used infix" "InfixMultiClause" 7 6
       ]
     ]
 -- | Dispatch-preserving rewrites need the GHC >= 9.12 exact-print
