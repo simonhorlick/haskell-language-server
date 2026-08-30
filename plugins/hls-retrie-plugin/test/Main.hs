@@ -177,6 +177,8 @@ inlineThisTests =
           testCommand "single clause pattern" "Pattern" 5 4
       , expectFailBecause "the bare-reference form is spliced into infix position" $
           testCommand "multi-clause operator used infix" "InfixMultiClause" 7 6
+      , expectFailBecause "a type-abstraction binder is copied into the case pattern" $
+          testCommand "refuses a clause with a type abstraction binder" "TypeAbstraction" 10 4
       ]
     ]
 -- | Dispatch-preserving rewrites need the GHC >= 9.12 exact-print
