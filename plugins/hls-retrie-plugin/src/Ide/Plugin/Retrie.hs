@@ -273,31 +273,25 @@ resolveInlineAll
   -> ExceptT PluginError (HandlerM Config) CodeAction
 resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
   pluginWithIndefiniteProgress (ca ^. L.title) Nothing Cancellable $ \ msg -> runExceptT $ do
-    nfp <- getNormalizedFilePathE uri
-    nfpSource <- getNormalizedFilePathE $ getLocationUri iaFromLocation
-    astSrc <- runActionE "retrie" state $ useE GetAnnotatedParsedSource nfpSource
-    let fromRange = rangeToRealSrcSpan nfpSource $ getLocationRange iaFromLocation
-        intoRange = rangeToRealSrcSpan nfp <$> getLocationRange <$> iaToLocation
-    (sessionSource, _) <- runActionE "retrie" state $ useWithStaleE GhcSessionDeps nfpSource
-    (checkSource, _) <- runActionE "retrie" state $ useWithStaleE TypeCheck nfpSource
+    tgtPath <- getNormalizedFilePathE uri
+    srcPath <- getNormalizedFilePathE $ getLocationUri iaFromLocation
 
-    defMod <- liftIO $ fixedModule (hscEnv sessionSource) checkSource astSrc
+    let fromSp = rangeToRealSrcSpan srcPath $ getLocationRange iaFromLocation
+        intoSp = rangeToRealSrcSpan tgtPath <$> getLocationRange <$> iaToLocation
 
-    let defRenameInfo = mkRenameInfo (tmrRenamed checkSource)
-        defScope = mkDefScope defRenameInfo checkSource
+    parsed <- runActionE "retrie" state $ useE GetAnnotatedParsedSource srcPath
 
-    inlineRewrite <- liftIO $ constructInlineFromIdentifer (fmSource defMod) fromRange
+    (session, _) <- runActionE "retrie" state $ useWithStaleE GhcSessionDeps srcPath
+    (check, _) <- runActionE "retrie" state $ useWithStaleE TypeCheck srcPath
 
-    when (null inlineRewrite) $
+    defMod <- liftIO $ fixedModule (hscEnv session) check parsed
+
+    rewrites <- liftIO $ constructInlineFromIdentifer (fmSource defMod) fromSp
+
+    when (null rewrites) $
       throwError $
         PluginInternalError
           "no inline rewrite could be built; the document may have changed"
-
-    let neededExts =
-          spliceExtensions
-            [ astA (tTemplate t)
-            | Query{qResult = (t, _)} <- inlineRewrite
-            ]
 
     refFiles <- case (iaModuleName, iaUnitId) of
       (Just modName, Just unit)
@@ -307,7 +301,11 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
       -- requesting file can reference it
       _ -> pure []
 
-    let targets = nubOrd (nfp : nfpSource : refFiles)
+    let targets = nubOrd (tgtPath : srcPath : refFiles)
+        neededExts =
+          spliceExtensions [ astA (tTemplate t) | Query{qResult = (t, _)} <- rewrites ]
+        defRenameInfo = mkRenameInfo (tmrRenamed check)
+        defScope = mkDefScope defRenameInfo check
 
     outcomes <- forM targets $ \ target -> do
       lift $ msg $ T.pack $ takeFileName (fromNormalizedFilePath target)
@@ -315,12 +313,12 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
         rewriteTarget
           recorder
           state
-          inlineRewrite
+          rewrites
           neededExts
           defRenameInfo
           defScope
           (fmFixities defMod)
-          intoRange
+          intoSp
           target
 
     let edits = Map.unionsWith (<>) [m | TargetEdited m <- outcomes]
@@ -335,7 +333,7 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
               -- defining file is exempt -- the definition itself is
               -- reference enough, with no call site behind it
               TargetSkipped
-                | target /= nfpSource
+                | target /= srcPath
                 , target `elem` refFiles ->
                     [ "no call site could be rewritten; bindings there"
                         <> " may capture variables of the inlined body,"
