@@ -161,12 +161,12 @@ resolveProvider recorder state _plId ca uri = \case
 -- built from; the occurrence name and defining module identify the
 -- function in the hiedb reference index.
 data RunRetrieInlineAllParams = RunRetrieInlineAllParams
-  { inlineAllFromThisLocation :: !Location
-  , inlineAllIntoThisLocation :: !(Maybe Location)
-  , inlineAllDefinition       :: !T.Text
-  , inlineAllOccName          :: !T.Text
-  , inlineAllModuleName       :: !(Maybe T.Text)
-  , inlineAllUnitId           :: !(Maybe T.Text)
+  { iaFromLocation :: !Location
+  , iaToLocation   :: !(Maybe Location)
+  , iaDefinition   :: !T.Text
+  , iaOccName      :: !T.Text
+  , iaModuleName   :: !(Maybe T.Text)
+  , iaUnitId       :: !(Maybe T.Text)
   }
   deriving (Eq, Show, Generic, FromJSON, ToJSON)
 
@@ -274,10 +274,10 @@ resolveInlineAll
 resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
   pluginWithIndefiniteProgress (ca ^. L.title) Nothing Cancellable $ \ msg -> runExceptT $ do
     nfp <- getNormalizedFilePathE uri
-    nfpSource <- getNormalizedFilePathE $ getLocationUri inlineAllFromThisLocation
+    nfpSource <- getNormalizedFilePathE $ getLocationUri iaFromLocation
     astSrc <- runActionE "retrie" state $ useE GetAnnotatedParsedSource nfpSource
-    let fromRange = rangeToRealSrcSpan nfpSource $ getLocationRange inlineAllFromThisLocation
-        intoRange = rangeToRealSrcSpan nfp <$> getLocationRange <$> inlineAllIntoThisLocation
+    let fromRange = rangeToRealSrcSpan nfpSource $ getLocationRange iaFromLocation
+        intoRange = rangeToRealSrcSpan nfp <$> getLocationRange <$> iaToLocation
     (sessionSource, _) <- runActionE "retrie" state $ useWithStaleE GhcSessionDeps nfpSource
     (checkSource, _) <- runActionE "retrie" state $ useWithStaleE TypeCheck nfpSource
 
@@ -299,10 +299,10 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
             | Query{qResult = (t, _)} <- inlineRewrite
             ]
 
-    refFiles <- case (inlineAllModuleName, inlineAllUnitId) of
+    refFiles <- case (iaModuleName, iaUnitId) of
       (Just modName, Just unit)
-        | isNothing inlineAllIntoThisLocation ->
-        liftIO $ referencingFiles state inlineAllOccName modName unit
+        | isNothing iaToLocation ->
+        liftIO $ referencingFiles state iaOccName modName unit
       -- a name without a module is locally bound; nothing outside the
       -- requesting file can reference it
       _ -> pure []
@@ -478,21 +478,21 @@ suggestBindInlines rdrEnv thisMod binds range hie lookupMod = do
         printedName = printOutputable name
         single =
           RunRetrieInlineAllParams
-            { inlineAllFromThisLocation = srcLoc
-            , inlineAllIntoThisLocation = Just siteLoc
-            , inlineAllDefinition = printedName
-            , inlineAllOccName = T.pack (occNameString name)
-            , inlineAllModuleName = fst <$> mbModUnit
-            , inlineAllUnitId = snd <$> mbModUnit
+            { iaFromLocation = srcLoc
+            , iaToLocation = Just siteLoc
+            , iaDefinition = printedName
+            , iaOccName = T.pack (occNameString name)
+            , iaModuleName = fst <$> mbModUnit
+            , iaUnitId = snd <$> mbModUnit
             }
         everywhere =
           RunRetrieInlineAllParams
-            { inlineAllFromThisLocation = srcLoc
-            , inlineAllIntoThisLocation = Nothing -- no site restriction
-            , inlineAllDefinition = printedName
-            , inlineAllOccName = T.pack (occNameString name)
-            , inlineAllModuleName = fst <$> mbModUnit
-            , inlineAllUnitId = snd <$> mbModUnit
+            { iaFromLocation = srcLoc
+            , iaToLocation = Nothing -- no site restriction
+            , iaDefinition = printedName
+            , iaOccName = T.pack (occNameString name)
+            , iaModuleName = fst <$> mbModUnit
+            , iaUnitId = snd <$> mbModUnit
             }
        in
         [ ("Inline " <> printedName, ResolveInlineAll single)
@@ -506,12 +506,12 @@ suggestBindInlines rdrEnv thisMod binds range hie lookupMod = do
        in [ ( "Inline " <> printedName <> " everywhere"
             , ResolveInlineAll
                 RunRetrieInlineAllParams
-                  { inlineAllFromThisLocation = defLoc
-                  , inlineAllIntoThisLocation = Nothing
-                  , inlineAllDefinition = printedName
-                  , inlineAllOccName = T.pack (occNameString name)
-                  , inlineAllModuleName = fst <$> mbModUnit
-                  , inlineAllUnitId = snd <$> mbModUnit
+                  { iaFromLocation = defLoc
+                  , iaToLocation = Nothing
+                  , iaDefinition = printedName
+                  , iaOccName = T.pack (occNameString name)
+                  , iaModuleName = fst <$> mbModUnit
+                  , iaUnitId = snd <$> mbModUnit
                   }
             )
           ]
