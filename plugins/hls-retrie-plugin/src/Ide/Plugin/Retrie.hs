@@ -330,21 +330,13 @@ resolveInlineAll recorder state ca uri RunRetrieInlineAllParams{..} = ExceptT $
           , reason <- case outcome of
               TargetNotRewritable reason -> [reason]
               TargetFailed reason        -> [reason]
+              -- nothing rewritten in a file expected to have a call
+              -- site: the requesting file of a single-site inline, or a
+              -- file the reference index names. The defining file is
+              -- exempt -- the definition itself is reference enough
               TargetSkipped
-                -- single site: the only target is the requesting file,
-                -- so nothing rewritten means the site was refused
-                | isJust iaToLocation ->
-                    [ "the call site was not rewritten; a binding there"
-                        <> " may capture a variable of the inlined body,"
-                        <> " or the body may reference names that cannot"
-                        <> " be imported here"
-                    ]
-                -- the reference index says this file uses the function,
-                -- yet nothing was rewritten: its sites were refused. The
-                -- defining file is exempt -- the definition itself is
-                -- reference enough, with no call site behind it
-                | target /= srcPath
-                , target `elem` refFiles ->
+                | isJust iaToLocation
+                    || (target /= srcPath && target `elem` refFiles) ->
                     [ "no call site could be rewritten; bindings there"
                         <> " may capture variables of the inlined body,"
                         <> " or the body may reference names that cannot"
