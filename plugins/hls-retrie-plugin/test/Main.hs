@@ -96,6 +96,8 @@ inlineThisTests =
           testCommand "signature-fixed type is kept at the site" "SigConstraint" 7 9
       , expectFailBecause "a body annotation naming a signature type variable is spliced verbatim" $
           testCommand "refuses a body that names a scoped type variable" "ScopedTyVar" 9 4
+      , expectFailBecause "a visible type application at the site is not matched" $
+          testCommand "visible type application at the site" "TypeAppSite" 7 4
       ]
     , testGroup "imports"
       [ testCommand "appends an import" "CrossFileUse" 6 4
