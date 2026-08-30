@@ -110,6 +110,8 @@ inlineThisTests =
       , testCommand "record-dot body with the field imported" "RecordDotImported" 9 4
       , testCommand "refuses a record-dot body when the field is not in scope" "RecordDotUse" 7 4
       , testCommand "refuses a record-dot body without the extension" "RecordDotNoExt" 6 4
+      , expectFailBecause "the do qualifier is a module name, not an occurrence, so no import is queued" $
+          testCommand "imports the qualifier of a QualifiedDo body" "QualifiedDoImportUse" 6 4
       ]
     , testGroup "inline everywhere"
       [ testEverywhere "rewrites all call sites in the module" "Everywhere" 6 4
@@ -168,6 +170,14 @@ inlineThisTests =
       ]
     , testGroup "extensions"
       [ testCommand "refuses a QuasiQuotes body into a module without the extension" "QuasiQuoteUse" 5 14
+      -- ApplicativeDo is not among the extensions checked; the refusal
+      -- currently holds only because the renamer strips the trailing
+      -- 'pure', leaving an occurrence import resolution cannot resolve
+      , testCommand "refuses an ApplicativeDo body into a module without the extension" "ApplicativeDoUse" 6 16
+      , expectFailBecause "the renamer strips the trailing pure, so its occurrence is unresolvable" $
+          testCommand "splices an ApplicativeDo body into a module with the extension" "ApplicativeDoExtUse" 7 16
+      , expectFailBecause "QualifiedDo is not among the extensions checked" $
+          testCommand "refuses a QualifiedDo body into a module without the extension" "QualifiedDoUse" 5 4
       ]
     , testGroup "cpp"
       [ testCommand "a '#'-led line in a non-CPP module is not a directive" "LabelLine" 15 6
