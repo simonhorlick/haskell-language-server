@@ -706,13 +706,14 @@ library hls-retrie-plugin
   import:           defaults, pedantic, warnings
   if !(flag(retrie) && (!impl(ghc ==9.10.*) || flag(ignore-plugins-ghc-bounds)))
     buildable: False
-  exposed-modules:  Ide.Plugin.Retrie
+  exposed-modules:
+    Ide.Plugin.Retrie
+    Ide.Plugin.Retrie.Imports
   other-modules:
     Ide.Plugin.Retrie.Dispatch
     Ide.Plugin.Retrie.Extensions
     Ide.Plugin.Retrie.Fixity
     Ide.Plugin.Retrie.GHC
-    Ide.Plugin.Retrie.Imports
     Ide.Plugin.Retrie.Transformer
   hs-source-dirs:   plugins/hls-retrie-plugin/src
   build-depends:
@@ -753,6 +754,8 @@ test-suite hls-retrie-plugin-tests
   build-depends:
     , containers
     , filepath
+    , ghc
+    , ghc-exactprint
     , hls-plugin-api
     , haskell-language-server:{hls-refactor-plugin, hls-retrie-plugin}
     , hls-test-utils             == 2.14.0.0

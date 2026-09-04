@@ -12,9 +12,15 @@ import qualified Data.Text                         as T
 import qualified Development.IDE.GHC.ExactPrint    as ExactPrint
 import qualified Development.IDE.Plugin.CodeAction as Refactor
 import           Development.IDE.Test              (referenceReady)
+import           GHC                               (mkModuleName)
+import           GHC.Types.Name.Occurrence         (mkDataOcc, mkTcOcc,
+                                                    mkVarOcc)
 import           Ide.Logger
 import           Ide.Plugin.Config
 import qualified Ide.Plugin.Retrie                 as Retrie
+import           Ide.Plugin.Retrie.Imports         (ImportForm (..),
+                                                    renderImport)
+import           Language.Haskell.GHC.ExactPrint   (exactPrint)
 import           System.FilePath
 import           Test.Hls
 
@@ -40,7 +46,29 @@ tests :: TestTree
 tests =
   testGroup "Retrie"
     [ inlineThisTests
+    , renderImportTests
     ]
+
+-- | The generated declarations exact-print with idiomatic spacing.
+renderImportTests :: TestTree
+renderImportTests =
+  testGroup "renderImport"
+    [ renders "import Data.Maybe" ("Data.Maybe", ImportModule)
+    , renders "import qualified Data.Map" ("Data.Map", ImportQualifiedAs (mkModuleName "Data.Map"))
+    , renders "import qualified Data.Map as M" ("Data.Map", ImportQualifiedAs (mkModuleName "M"))
+    , renders "import Data.List ((\\\\), sortOn, Maybe (Just))"
+        ( "Data.List"
+        , ImportMembers
+            [ (mkVarOcc "\\\\", Nothing)
+            , (mkVarOcc "sortOn", Nothing)
+            , (mkDataOcc "Just", Just (mkTcOcc "Maybe"))
+            ]
+        )
+    ]
+  where
+    renders expected (m, form) =
+      testCase expected $
+        exactPrint (renderImport (mkModuleName m, form)) @?= expected
 
 inlineThisTests :: TestTree
 inlineThisTests =
