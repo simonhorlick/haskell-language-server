@@ -33,49 +33,85 @@ module Ide.Plugin.Retrie.Imports
   , TargetScope (..)
   , mkTargetScope
   , requalifyRewrite
+  , ImportForm (..)
+  , renderImport
   ) where
 
-import           Control.Monad.Trans.Class        (lift)
-import           Control.Monad.Trans.State.Strict (StateT, modify', runStateT)
-import           Data.Data                        (Data)
-import           Data.List                        (intercalate, nub, sortOn)
-import           Data.Map.Strict                  (Map)
-import qualified Data.Map.Strict                  as Map
-import           Data.Set                         (Set)
-import qualified Data.Set                         as Set
+import           Control.Monad.Trans.Class                 (lift)
+import           Control.Monad.Trans.State.Strict          (StateT, modify',
+                                                            runStateT)
+import           Data.Data                                 (Data)
+import           Data.List                                 (nub, sortOn)
+import           Data.List.NonEmpty                        (NonEmpty (..))
+import           Data.Map.Strict                           (Map)
+import qualified Data.Map.Strict                           as Map
+import           Data.Set                                  (Set)
+import qualified Data.Set                                  as Set
 
-import           Development.IDE                  (TcModuleResult (..))
-import           Development.IDE.GHC.Compat       (GenLocated (L), GhcPs,
-                                                   ModuleName, Name, OccName,
-                                                   RdrName (..),
-                                                   availsToNameSet, getLocA,
-                                                   gre_imp, gre_lcl, gre_name,
-                                                   moduleName, moduleNameString,
-                                                   nameOccName, occNameString,
-                                                   pattern RealSrcSpan,
-                                                   rdrNameOcc)
-import qualified Development.IDE.GHC.Compat       as GHC
-import qualified GHC                              as GHCGHC
-import           GHC.Data.EnumSet                 (EnumSet)
-import           GHC.Data.FastString              (FastString, unpackFS)
-import           GHC.Types.Name                   (isBuiltInSyntax,
-                                                   isInternalName)
-import           GHC.Types.Name.Occurrence        (isSymOcc)
-import           GHC.Types.Name.Reader            (GlobalRdrEnv,
-                                                   globalRdrEnvElts,
-                                                   lookupGRE_Name, mkRdrQual,
-                                                   mkRdrUnqual, unQualOK)
-import           GHC.Types.Name.Set               (NameSet, elemNameSet)
-import           Language.Haskell.Syntax.Basic    (FieldLabelString (..))
+import           Development.IDE                           (TcModuleResult (..))
+import           Development.IDE.GHC.Compat                (GenLocated (L),
+                                                            GhcPs, ModuleName,
+                                                            Name, OccName,
+                                                            RdrName (..),
+                                                            availsToNameSet,
+                                                            getLocA, gre_imp,
+                                                            gre_lcl, gre_name,
+                                                            moduleName,
+                                                            moduleNameString,
+                                                            nameOccName,
+                                                            occNameString,
+                                                            pattern RealSrcSpan,
+                                                            rdrNameOcc)
+import qualified Development.IDE.GHC.Compat                as GHC
+import           Development.IDE.GHC.ExactPrint.Annotation (withCommas)
+import           Development.IDE.GHC.ExactPrint.IE         (ieVar, mkIEName,
+                                                            mkTypeWithIE)
+import qualified GHC                                       as GHCGHC
+import           GHC.Data.EnumSet                          (EnumSet)
+import           GHC.Data.FastString                       (FastString,
+                                                            unpackFS)
+import           GHC.Hs.ImpExp                             (EpAnnImportDecl (..),
+                                                            ImportDecl (..),
+                                                            ImportDeclQualifiedStyle (..),
+                                                            ImportListInterpretation (..),
+                                                            LIE, LImportDecl,
+                                                            XImportDeclPass (..),
+                                                            simpleImportDecl)
+import           GHC.Parser.Annotation                     (AnnList (..),
+                                                            AnnListBrackets (..),
+                                                            DeltaPos (..),
+                                                            EpAnn (..),
+                                                            EpToken (..),
+                                                            LocatedLI,
+                                                            emptyComments,
+                                                            noAnn)
+import           GHC.Types.Name                            (isBuiltInSyntax,
+                                                            isInternalName)
+import           GHC.Types.Name.Reader                     (GlobalRdrEnv,
+                                                            globalRdrEnvElts,
+                                                            lookupGRE_Name,
+                                                            mkRdrQual,
+                                                            mkRdrUnqual,
+                                                            unQualOK)
+import           GHC.Types.Name.Set                        (NameSet,
+                                                            elemNameSet)
+import           GHC.Types.SourceText                      (SourceText (NoSourceText))
+import           Language.Haskell.Syntax.Basic             (FieldLabelString (..))
 
-import           Retrie                           (RenameInfo, astA)
-import           Retrie.ExactPrint                (parseImports, seedA,
-                                                   unsafeMkA)
-import           Retrie.RenameInfo                (riNameMap)
-import           Retrie.SYB                       (everywhereM, extM, mkM)
-import           Retrie.Types                     (MatchResult (..), Rewrite,
-                                                   Template (..))
-import           Retrie.Universe                  (Universe)
+import           Retrie                                    (RenameInfo, astA)
+import           Retrie.ExactPrint                         (AnnotatedImports,
+                                                            d0, dn,
+                                                            noAnnSrcSpanDP0,
+                                                            noAnnSrcSpanDP1,
+                                                            seedA, setEntryDP,
+                                                            unsafeMkA)
+import           Retrie.RenameInfo                         (riNameMap)
+import           Retrie.SYB                                (everywhereM, extM,
+                                                            mkM)
+import           Retrie.Types                              (MatchResult (..),
+                                                            Rewrite,
+                                                            Template (..))
+import           Retrie.Universe                           (Universe)
 
 import           Ide.Plugin.Retrie.GHC
 import           Ide.Plugin.Retrie.Transformer
@@ -135,13 +171,11 @@ mkTargetScope tmr = TargetScope
 requalifyRewrite
   :: (String -> IO ())
   -- ^ Refusal logger.
-  -> FilePath
-  -- ^ GHC libdir, for parsing the generated import declarations.
   -> DefScope
   -> TargetScope
   -> Rewrite Universe
   -> Rewrite Universe
-requalifyRewrite logRefuse libdir def tgt =
+requalifyRewrite logRefuse def tgt =
   overTransformer $ \orig ctxt match -> orig ctxt match >>= post
   where
     post NoMatch = pure NoMatch
@@ -150,12 +184,10 @@ requalifyRewrite logRefuse libdir def tgt =
         Left reason -> do
           logRefuse reason
           pure NoMatch
-        Right (ast', items) -> do
-          newImports <-
-            parseImports libdir (map renderImport (consolidate items))
+        Right (ast', items) ->
           pure $ MatchResult sub tmpl
             { tTemplate = unsafeMkA ast' (seedA (tTemplate tmpl))
-            , tImports = tImports tmpl <> newImports
+            , tImports = tImports tmpl <> renderImports (consolidate items)
             }
 
 -- ---------------------------------------------------------------------
@@ -346,7 +378,9 @@ occupiedBy TargetScope{tsGlobalEnv} rdr =
 
 -- | The import declaration shapes import resolution generates.
 data ImportForm
-  = ImportMembers [(OccName, Maybe OccName)]
+  = ImportModule
+    -- ^ @import M@.
+  | ImportMembers [(OccName, Maybe OccName)]
     -- ^ @import M (f, g, T (C))@.
   | ImportQualifiedAs ModuleName
     -- ^ @import qualified M as Q@ (or plain @import qualified M@ when
@@ -363,21 +397,39 @@ consolidate raw = quals ++ members
       , let ms = [ (occ, mp) | (m', ItemMember occ mp) <- items, m' == m ]
       ]
 
--- | Render an import requirement as source text; the emitted text is
--- parsed back into a declaration, so it needs no annotation surgery.
--- Symbolic names get parens (@import Data.List ((\\\\))@).
-renderImport :: (ModuleName, ImportForm) -> String
-renderImport (m, ImportQualifiedAs q)
-  | q == m = "import qualified " ++ moduleNameString m
-  | otherwise =
-      "import qualified " ++ moduleNameString m
-        ++ " as " ++ moduleNameString q
-renderImport (m, ImportMembers ms) =
-  "import " ++ moduleNameString m
-    ++ " (" ++ intercalate ", " (map member ms) ++ ")"
+renderImports :: [(ModuleName, ImportForm)] -> AnnotatedImports
+renderImports items = unsafeMkA (map renderImport items) 0
+
+-- | Build an import declaration, annotated so it exact-prints with
+-- idiomatic spacing. Symbolic names get parens
+-- (@import Data.List ((\\\\))@).
+renderImport :: (ModuleName, ImportForm) -> LImportDecl GhcPs
+renderImport (m, form) = L noAnnSrcSpanDP0 $ case form of
+  ImportModule -> base { ideclExt = ext Nothing Nothing }
+  ImportQualifiedAs q
+    | q == m ->
+        base { ideclQualified = QualifiedPre, ideclExt = ext (Just qualTok) Nothing }
+    | otherwise ->
+        base { ideclQualified = QualifiedPre
+             , ideclAs        = Just (L noAnnSrcSpanDP1 q)
+             , ideclExt       = ext (Just qualTok) (Just (EpTok (dn 1))) }
+  ImportMembers ms ->
+    base { ideclImportList = Just (Exactly, importList (zipWith member [0 ..] ms))
+         , ideclExt        = ext Nothing Nothing }
   where
-    member (occ, Nothing)     = wrap occ
-    member (occ, Just parent) = wrap parent ++ " (" ++ wrap occ ++ ")"
-    wrap occ
-      | isSymOcc occ = "(" ++ occNameString occ ++ ")"
-      | otherwise = occNameString occ
+    base = (simpleImportDecl m) { ideclName = L noAnnSrcSpanDP1 m }
+    qualTok = EpTok (dn 1)
+    ext qual as' = XImportDeclPass
+      (EpAnn d0 (EpAnnImportDecl (EpTok d0) Nothing Nothing Nothing qual Nothing as') emptyComments)
+      NoSourceText False
+    member :: Int -> (OccName, Maybe OccName) -> LIE GhcPs
+    member i (occ, Nothing) =
+      setEntryDP (ieVar (mkIEName (mkRdrUnqual occ))) (SameLine (min i 1))
+    member i (occ, Just p) =
+      setEntryDP (mkTypeWithIE (mkRdrUnqual p) (mkRdrUnqual occ :| [])) (SameLine (min i 1))
+
+-- | @(item, item)@ one space after the module name.
+importList :: [LIE GhcPs] -> LocatedLI [LIE GhcPs]
+importList items = L (EpAnn (dn 1) ann emptyComments) (withCommas items)
+  where
+    ann = noAnn { al_brackets = ListParens (EpTok d0) (EpTok d0) }

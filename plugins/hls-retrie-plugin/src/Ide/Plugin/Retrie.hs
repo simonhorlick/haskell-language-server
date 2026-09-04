@@ -58,8 +58,7 @@ import           Development.IDE.GHC.Compat           (GRHSs (GRHSs),
                                                        pattern RealSrcSpan,
                                                        pm_parsed_source,
                                                        srcSpanFile,
-                                                       stringToUnit, topDir,
-                                                       unLoc)
+                                                       stringToUnit, unLoc)
 import qualified Development.IDE.GHC.Compat           as GHC
 import           Development.IDE.GHC.Compat.Util      hiding (catch, try)
 import           Development.IDE.GHC.ExactPrint       (GetAnnotatedParsedSource (GetAnnotatedParsedSource),
@@ -107,7 +106,6 @@ import           System.FilePath                      (takeFileName)
 import           Retrie.SYB                           (everything, listify, mkQ)
 import           Retrie.Types
 import           Retrie.Universe                      (Universe)
-
 
 import           Data.Maybe                           (isJust, isNothing)
 import           Ide.Plugin.Retrie.Dispatch           (dispatchRewrites,
@@ -227,10 +225,10 @@ rewriteTarget recorder state inlineRewrite neededExts defRenameInfo defScope def
     (cpp, annPs, contents) <-
       getCPPmodule recorder state session targetFixities $
         fromNormalizedFilePath target
-    pure (session, check, targetFixities, cpp, annPs, contents)
+    pure (check, targetFixities, cpp, annPs, contents)
   case inputs of
     Left err -> pure $ TargetFailed $ T.pack $ show err
-    Right (session, check, targetFixities, cpp, annPs, contents)
+    Right (check, targetFixities, cpp, annPs, contents)
       | Left reason <- spliceableInto neededExts (mkTargetScope check) ->
           pure $ TargetNotRewritable $ T.pack reason
       | otherwise -> do
@@ -241,7 +239,6 @@ rewriteTarget recorder state inlineRewrite neededExts defRenameInfo defScope def
               (maybe id restrictToSite singleSite
                 . requalifyRewrite
                     (logWith recorder Debug . LogImportRefused)
-                    (topDir (GHC.hsc_dflags session))
                     defScope
                     (mkTargetScope check))
               inlineRewrite
@@ -746,13 +743,7 @@ importTextEdits target ps contents annIs =
         , Just (unLoc (ideclName (unLoc i))) /= selfName
         , not (render i `Set.member` existing)
         ]
-    -- A declaration that came in with a real span was parsed, so it
-    -- exact-prints with its idiomatic spacing ("import M (f)"); a
-    -- generated span means the declaration was built programmatically
-    -- without annotations ('toImportDecl') and only ppr can render it.
-    importText i = case GHC.getLocA i of
-      RealSrcSpan _ _ -> T.strip (T.pack (exactPrint i))
-      _               -> render i
+    importText = T.strip . T.pack . exactPrint
 
 -------------------------------------------------------------------------------
 -- Rule wrappers
