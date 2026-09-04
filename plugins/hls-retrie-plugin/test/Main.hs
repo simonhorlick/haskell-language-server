@@ -104,6 +104,8 @@ inlineThisTests =
       , testCommand "append import at layout column" "IndentImportUse" 6 6
       , testCommand "respells to the target's qualified spelling" "QualifiedScopeUse" 6 4
       , testCommand "import qualified" "QualifiedBodyUse" 5 4
+      , expectFailBecause "pattern synonyms are imported without the pattern keyword" $
+          testCommand "imports a pattern synonym named in the body" "ImportedPatSyn" 6 4
       , testCommand "reject if required import isn't exported" "CrossModuleNotExportedUse" 4 4
       , testCommand "built-in syntax splices without an import" "BuiltinSyntax" 6 4
       , testCommand "record-dot body with the field in scope" "RecordDot" 9 6
