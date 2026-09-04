@@ -11,8 +11,7 @@ module Ide.Plugin.Retrie.GHC
   ) where
 
 import           Development.IDE.GHC.Compat (ImportSpec, ModuleName, Name,
-                                             RdrName, gre_par, moduleName,
-                                             nameOccName)
+                                             RdrName, gre_par, moduleName)
 import           GHC.Data.FastString        (FastString)
 import           GHC.Hs                     (GhcPs, LHsExpr, LPat, Match (..))
 import           GHC.Types.Name.Occurrence  (mkVarOccFS)
