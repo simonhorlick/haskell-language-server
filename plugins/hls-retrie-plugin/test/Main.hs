@@ -137,6 +137,16 @@ inlineThisTests =
       , testCommand "imports a pattern synonym named in the body" "ImportedPatSyn" 6 4
       , testCommand "refuses a pattern synonym import without the extension" "ImportedPatSynNoExt" 6 4
       , testCommand "imports a bundled pattern synonym via its parent" "ImportedPatSynBundledUse" 5 4
+      , expectFailBecause "the spelling check looks up the variable namespace only, so a clashing field is not seen" $
+          testCommand "refuses a selector whose spelling a local field occupies" "FieldClash" 9 4
+      , expectFailBecause "the spelling check looks the field's own namespace up, so a clashing variable is not seen" $
+          testCommand "refuses a selector whose spelling a local variable contests" "VarClash" 10 4
+      , expectFailBecause "the spelling check looks the field's own namespace up, so a field of another record is not seen" $
+          testCommand "refuses a selector whose spelling a local field contests" "FieldFieldClash" 9 4
+      , expectFailBecause "the spelling check looks up the variable namespace only, so a clashing field is not seen" $
+          testCommand "refuses a construction label a local field occupies" "ConLabelNoDisamb" 9 4
+      , expectFailBecause "the spelling check looks up the variable namespace only, so a clashing field is not seen" $
+          testCommand "refuses a pattern label a local field occupies" "ConPatNoDisamb" 9 4
       , testCommand "reject if required import isn't exported" "CrossModuleNotExportedUse" 4 4
       , testCommand "built-in syntax splices without an import" "BuiltinSyntax" 6 4
       , testCommand "record-dot body with the field in scope" "RecordDot" 9 6
