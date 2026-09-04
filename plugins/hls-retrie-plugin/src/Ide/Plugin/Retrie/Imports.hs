@@ -34,6 +34,7 @@ module Ide.Plugin.Retrie.Imports
   , mkTargetScope
   , requalifyRewrite
   , ImportForm (..)
+  , MemberForm (..)
   , renderImport
   ) where
 
@@ -64,10 +65,13 @@ import           Development.IDE.GHC.Compat                (GenLocated (L),
                                                             rdrNameOcc)
 import qualified Development.IDE.GHC.Compat                as GHC
 import           Development.IDE.GHC.ExactPrint.Annotation (withCommas)
-import           Development.IDE.GHC.ExactPrint.IE         (ieVar, mkIEName,
-                                                            mkTypeWithIE)
+import           Development.IDE.GHC.ExactPrint.IE         (WrapKind (..),
+                                                            ieVar, mkIEName,
+                                                            mkTypeWithIE,
+                                                            mkWrappedName)
 import qualified GHC                                       as GHCGHC
 import           GHC.Data.EnumSet                          (EnumSet)
+import qualified GHC.Data.EnumSet                          as EnumSet
 import           GHC.Data.FastString                       (FastString,
                                                             unpackFS)
 import           GHC.Hs.ImpExp                             (EpAnnImportDecl (..),
@@ -77,6 +81,7 @@ import           GHC.Hs.ImpExp                             (EpAnnImportDecl (..)
                                                             LIE, LImportDecl,
                                                             XImportDeclPass (..),
                                                             simpleImportDecl)
+import           GHC.LanguageExtensions.Type               (Extension (PatternSynonyms))
 import           GHC.Parser.Annotation                     (AnnList (..),
                                                             AnnListBrackets (..),
                                                             DeltaPos (..),
@@ -85,10 +90,17 @@ import           GHC.Parser.Annotation                     (AnnList (..),
                                                             LocatedLI,
                                                             emptyComments,
                                                             noAnn)
+import           GHC.Types.Avail                           (AvailInfo (AvailTC))
+import           GHC.Types.GREInfo                         (ConInfo (..),
+                                                            ConLikeInfo (..),
+                                                            GREInfo (..))
 import           GHC.Types.Name                            (isBuiltInSyntax,
                                                             isInternalName)
-import           GHC.Types.Name.Reader                     (GlobalRdrEnv,
+import           GHC.Types.Name.Reader                     (GlobalRdrElt,
+                                                            GlobalRdrEnv,
+                                                            Parent (..),
                                                             globalRdrEnvElts,
+                                                            gre_info, gre_par,
                                                             lookupGRE_Name,
                                                             mkRdrQual,
                                                             mkRdrUnqual,
@@ -128,6 +140,11 @@ data DefScope = DefScope
   , dsFiles     :: Set FastString
   , dsGlobalEnv :: GlobalRdrEnv
   , dsExports   :: NameSet
+  , dsBundled   :: Map Name Name
+    -- ^ The parent each exported child is bundled under
+    -- (@module M (T (C, P))@). A definition's own 'GlobalRdrElt' does
+    -- not record export-list bundling, so this is what makes a local
+    -- pattern synonym importable as @T (P)@.
   }
 
 mkDefScope :: RenameInfo -> TcModuleResult -> DefScope
@@ -136,10 +153,13 @@ mkDefScope ri tmr = DefScope
   , dsNames = names
   , dsFiles = Set.fromList (map GHC.srcSpanFile (Map.keys names))
   , dsGlobalEnv = GHC.tcg_rdr_env tc
-  , dsExports = availsToNameSet (GHC.tcg_exports tc)
+  , dsExports = availsToNameSet exports
+  , dsBundled =
+      Map.fromList [ (n, p) | AvailTC p ns <- exports, n <- ns, n /= p ]
   }
   where
     tc = tmrTypechecked tmr
+    exports = GHC.tcg_exports tc
     names = riNameMap ri
 
 -- | What the target module knows: which names are in scope under which
@@ -198,9 +218,9 @@ data ImportItem
   = ItemQualAs ModuleName
     -- ^ The occurrence keeps its qualified source spelling; import
     -- the module under that alias.
-  | ItemMember OccName (Maybe OccName)
+  | ItemMember OccName MemberForm
     -- ^ The occurrence keeps its unqualified source spelling; import
-    -- it explicitly (via its parent type constructor, when present).
+    -- it explicitly.
   deriving (Eq)
 
 type RequalM = StateT [(ModuleName, ImportItem)] (Either String)
@@ -292,8 +312,12 @@ requalifyTemplate def tgt ast =
                  | otherwise -> do
                     add (pModule, ItemQualAs q)
                     pure rdr
+        | Unqual _ <- rdr, AsPattern <- pMember
+        , not (PatternSynonyms `EnumSet.member` tsExtensions tgt) ->
+            refuse $ "importing pattern synonym " ++ showRdr rdr
+              ++ " needs PatternSynonyms in the target"
         | Unqual occ <- rdr -> do
-            add (pModule, ItemMember occ pParent)
+            add (pModule, ItemMember occ pMember)
             pure rdr
         | otherwise ->
             refuse $ "unsupported spelling " ++ showRdr rdr
@@ -323,10 +347,8 @@ data Provenance
         -- name imports as @Data.Char@, not its defining
         -- @GHC.Internal.*@ module), or the defining module itself for
         -- its own exported definitions.
-      , pParent :: Maybe OccName
-        -- ^ For names importable only via their parent (data
-        -- constructors, record fields): the parent type constructor,
-        -- yielding the @import M (T (C))@ form.
+      , pMember :: MemberForm
+        -- ^ How the name is spelled in an import list.
       }
   | LocalOnly ModuleName
     -- ^ Defined in the defining module and not exported: referencable
@@ -343,11 +365,31 @@ provenanceOf DefScope{..} name = do
   if gre_lcl gre
     then Just $
       if name `elemNameSet` dsExports
-        then Importable dsModule (greParentOcc gre)
+        then Importable dsModule $ case Map.lookup name dsBundled of
+          Just p  -> ViaParent (nameOccName p)
+          Nothing -> memberForm gre
         else LocalOnly dsModule
     else case sortOn moduleNameString (map greImportModule (gre_imp gre)) of
-      m : _ -> Just $ Importable m (greParentOcc gre)
+      m : _ -> Just $ Importable m (memberForm gre)
       []    -> Nothing
+
+-- | How an unqualified name is spelled in an import list.
+data MemberForm
+  = Plain
+    -- ^ @import M (f)@.
+  | ViaParent OccName
+    -- ^ @import M (T (C))@: data constructors, record fields and
+    -- bundled pattern synonyms import via their parent type.
+  | AsPattern
+    -- ^ @import M (pattern P)@: an unbundled pattern synonym.
+  deriving (Eq, Show)
+
+memberForm :: GlobalRdrElt -> MemberForm
+memberForm gre = case (gre_par gre, gre_info gre) of
+  (ParentIs p, _) -> ViaParent (nameOccName p)
+  (NoParent, IAmConLike con)
+    | ConIsPatSyn <- conLikeInfo con -> AsPattern
+  _ -> Plain
 
 -- | Every spelling under which a 'Name' is in scope in the target, in
 -- preference order: unqualified first (when available), then qualified
@@ -380,8 +422,8 @@ occupiedBy TargetScope{tsGlobalEnv} rdr =
 data ImportForm
   = ImportModule
     -- ^ @import M@.
-  | ImportMembers [(OccName, Maybe OccName)]
-    -- ^ @import M (f, g, T (C))@.
+  | ImportMembers [(OccName, MemberForm)]
+    -- ^ @import M (f, T (C), pattern P)@.
   | ImportQualifiedAs ModuleName
     -- ^ @import qualified M as Q@ (or plain @import qualified M@ when
     -- the qualifier is the module's own name).
@@ -422,11 +464,13 @@ renderImport (m, form) = L noAnnSrcSpanDP0 $ case form of
     ext qual as' = XImportDeclPass
       (EpAnn d0 (EpAnnImportDecl (EpTok d0) Nothing Nothing Nothing qual Nothing as') emptyComments)
       NoSourceText False
-    member :: Int -> (OccName, Maybe OccName) -> LIE GhcPs
-    member i (occ, Nothing) =
-      setEntryDP (ieVar (mkIEName (mkRdrUnqual occ))) (SameLine (min i 1))
-    member i (occ, Just p) =
-      setEntryDP (mkTypeWithIE (mkRdrUnqual p) (mkRdrUnqual occ :| [])) (SameLine (min i 1))
+    member :: Int -> (OccName, MemberForm) -> LIE GhcPs
+    member i (occ, mf) = setEntryDP ie (SameLine (min i 1))
+      where
+        ie = case mf of
+          Plain       -> ieVar (mkIEName (mkRdrUnqual occ))
+          ViaParent p -> mkTypeWithIE (mkRdrUnqual p) (mkRdrUnqual occ :| [])
+          AsPattern   -> ieVar (mkWrappedName WrapPattern (mkRdrUnqual occ))
 
 -- | @(item, item)@ one space after the module name.
 importList :: [LIE GhcPs] -> LocatedLI [LIE GhcPs]

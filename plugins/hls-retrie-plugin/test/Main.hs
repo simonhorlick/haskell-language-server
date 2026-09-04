@@ -19,6 +19,7 @@ import           Ide.Logger
 import           Ide.Plugin.Config
 import qualified Ide.Plugin.Retrie                 as Retrie
 import           Ide.Plugin.Retrie.Imports         (ImportForm (..),
+                                                    MemberForm (..),
                                                     renderImport)
 import           Language.Haskell.GHC.ExactPrint   (exactPrint)
 import           System.FilePath
@@ -59,11 +60,12 @@ renderImportTests =
     , renders "import Data.List ((\\\\), sortOn, Maybe (Just))"
         ( "Data.List"
         , ImportMembers
-            [ (mkVarOcc "\\\\", Nothing)
-            , (mkVarOcc "sortOn", Nothing)
-            , (mkDataOcc "Just", Just (mkTcOcc "Maybe"))
+            [ (mkVarOcc "\\\\", Plain)
+            , (mkVarOcc "sortOn", Plain)
+            , (mkDataOcc "Just", ViaParent (mkTcOcc "Maybe"))
             ]
         )
+    , renders "import M (pattern One)" ("M", ImportMembers [(mkDataOcc "One", AsPattern)])
     ]
   where
     renders expected (m, form) =
@@ -132,8 +134,9 @@ inlineThisTests =
       , testCommand "append import at layout column" "IndentImportUse" 6 6
       , testCommand "respells to the target's qualified spelling" "QualifiedScopeUse" 6 4
       , testCommand "import qualified" "QualifiedBodyUse" 5 4
-      , expectFailBecause "pattern synonyms are imported without the pattern keyword" $
-          testCommand "imports a pattern synonym named in the body" "ImportedPatSyn" 6 4
+      , testCommand "imports a pattern synonym named in the body" "ImportedPatSyn" 6 4
+      , testCommand "refuses a pattern synonym import without the extension" "ImportedPatSynNoExt" 6 4
+      , testCommand "imports a bundled pattern synonym via its parent" "ImportedPatSynBundledUse" 5 4
       , testCommand "reject if required import isn't exported" "CrossModuleNotExportedUse" 4 4
       , testCommand "built-in syntax splices without an import" "BuiltinSyntax" 6 4
       , testCommand "record-dot body with the field in scope" "RecordDot" 9 6

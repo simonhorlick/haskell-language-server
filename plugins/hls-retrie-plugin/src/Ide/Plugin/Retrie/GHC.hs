@@ -7,12 +7,11 @@ module Ide.Plugin.Retrie.GHC
   , greIsParentless
   , greImportModule
   , greImportQualifier
-  , greParentOcc
   ) where
 
 import           Development.IDE.GHC.Compat (ImportSpec, ModuleName, Name,
-                                             OccName, RdrName, gre_par,
-                                             moduleName, nameOccName)
+                                             RdrName, gre_par, moduleName,
+                                             nameOccName)
 import           GHC.Data.FastString        (FastString)
 import           GHC.Types.Name.Occurrence  (mkVarOccFS)
 import           GHC.Types.Name.Reader      (GlobalRdrElt, GlobalRdrEnv,
@@ -75,9 +74,3 @@ greImportModule = RdrName.is_mod . is_decl
 greImportQualifier :: ImportSpec -> ModuleName
 greImportQualifier = is_as . is_decl
 
--- | The parent type constructor of a name that can only be imported
--- via its parent (data constructors, record fields).
-greParentOcc :: GlobalRdrElt -> Maybe OccName
-greParentOcc gre = case gre_par gre of
-  ParentIs p -> Just (nameOccName p)
-  _          -> Nothing
