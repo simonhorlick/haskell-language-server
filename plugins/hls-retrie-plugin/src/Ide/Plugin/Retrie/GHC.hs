@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP #-}
--- | Version-independent views of GHC's 'GlobalRdrEnv'.
+-- | Version-independent views of GHC's 'GlobalRdrEnv' and parsed AST.
 module Ide.Plugin.Retrie.GHC
   ( lookupGRERdr
   , lookupGREName
@@ -7,12 +7,14 @@ module Ide.Plugin.Retrie.GHC
   , greIsParentless
   , greImportModule
   , greImportQualifier
+  , matchClausePats
   ) where
 
 import           Development.IDE.GHC.Compat (ImportSpec, ModuleName, Name,
                                              RdrName, gre_par, moduleName,
                                              nameOccName)
 import           GHC.Data.FastString        (FastString)
+import           GHC.Hs                     (GhcPs, LHsExpr, LPat, Match (..))
 import           GHC.Types.Name.Occurrence  (mkVarOccFS)
 import           GHC.Types.Name.Reader      (GlobalRdrElt, GlobalRdrEnv,
                                              Parent (..), isRecFldGRE, is_as,
@@ -25,6 +27,9 @@ import           GHC.Types.Name.Reader      (FieldsOrSelectors (WantField),
                                              WhichGREs (RelevantGREsFOS, SameNameSpace))
 #else
 import           GHC.Types.Name.Reader      (mkRdrUnqual)
+#endif
+#if MIN_VERSION_ghc(9,12,0)
+import           GHC.Types.SrcLoc           (unLoc)
 #endif
 
 -- | Every 'GlobalRdrElt' a spelling resolves to in the scope, within
@@ -74,3 +79,11 @@ greImportModule = RdrName.is_mod . is_decl
 greImportQualifier :: ImportSpec -> ModuleName
 greImportQualifier = is_as . is_decl
 
+-- | @m_pats@ as a plain list: GHC 9.12 wrapped the pattern list of a
+-- 'Match' in an outer 'Located'.
+matchClausePats :: Match GhcPs (LHsExpr GhcPs) -> [LPat GhcPs]
+#if MIN_VERSION_ghc(9,12,0)
+matchClausePats = unLoc . m_pats
+#else
+matchClausePats = m_pats
+#endif

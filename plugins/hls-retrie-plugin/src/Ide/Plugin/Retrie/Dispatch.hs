@@ -28,6 +28,7 @@ module Ide.Plugin.Retrie.Dispatch
 
 import qualified Data.Foldable                             as F
 import           Data.Generics                             (listify)
+import           Ide.Plugin.Retrie.GHC                     (matchClausePats)
 import           Retrie.ExactPrint                         (TransformT)
 import           Retrie.GHC
 import           Retrie.Types                              (Rewrite)
@@ -73,15 +74,6 @@ triviallySelectable mg = case unLoc (mg_alts mg) of
     wildcardCon HsRecFields{rec_dotdot = Just{}} = True
     wildcardCon _                                = False
     usesWildcardCon = not . null . listify wildcardCon
-
--- | @m_pats@ as a plain list: GHC 9.12 wrapped the pattern list of a
--- 'Match' in an outer 'Located'.
-matchClausePats :: Match GhcPs (LHsExpr GhcPs) -> [LPat GhcPs]
-#if MIN_VERSION_ghc(9,12,0)
-matchClausePats = unLoc . m_pats
-#else
-matchClausePats = m_pats
-#endif
 
 #if MIN_VERSION_ghc(9,12,0)
 
