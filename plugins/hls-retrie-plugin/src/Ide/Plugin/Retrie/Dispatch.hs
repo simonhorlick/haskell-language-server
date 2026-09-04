@@ -34,7 +34,7 @@ import           Retrie.Types                              (Rewrite)
 
 #if MIN_VERSION_ghc(9,12,0)
 import qualified Data.Set                                  as S
-import           Development.IDE.GHC.ExactPrint.Annotation (ensureTrailingComma)
+import           Development.IDE.GHC.ExactPrint.Annotation (withCommas)
 import           Retrie.ExactPrint                         (pruneA, setEntryDP)
 import           Retrie.Expr                               (mkAnchor, mkApps,
                                                             mkLams, mkLocA,
@@ -197,14 +197,6 @@ tupleComponents :: [LocatedA e] -> TransformT IO [LocatedA e]
 tupleComponents xs = pure (withCommas (zipWith reEnter [0 :: Int ..] xs))
   where
     reEnter i x = setEntryDP x (SameLine (min i 1))
-
--- | Add a trailing comma annotation to every element but the last.
-withCommas :: [LocatedA e] -> [LocatedA e]
-withCommas []       = []
-withCommas [x]      = [x]
-withCommas (x : xs) = addComma x : withCommas xs
-  where
-    addComma (L l e) = L (ensureTrailingComma l) e
 
 -- | Swap each right-hand side's @=@ separator for @->@, keeping its
 -- position (and any guard bars) so the clause's spacing survives.
