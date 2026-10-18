@@ -48,7 +48,8 @@ hover state _ (HoverParams (TextDocumentIdentifier uri) pos _) = do
         fixityText :: (Name, Fixity) -> T.Text
 #if MIN_VERSION_GLASGOW_HASKELL(9,12,0,0)
         fixityText (name, Fixity precedence direction) =
+            printOutputable direction <> " " <> printOutputable precedence <> " `" <> printOutputable name <> "`"
 #else
         fixityText (name, Fixity _ precedence direction) =
-#endif
             printOutputable direction <> " " <> printOutputable precedence <> " `" <> printOutputable name <> "`"
+#endif
