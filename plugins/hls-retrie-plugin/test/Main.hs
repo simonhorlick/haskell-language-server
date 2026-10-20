@@ -5,17 +5,22 @@
 
 module Main (main) where
 
+import           Control.Monad                     (replicateM)
 import qualified Data.Map                          as M
+import           Data.Maybe                        (isJust)
 import           Data.Text                         (Text)
 import qualified Data.Text                         as T
 import qualified Data.Text.IO                      as T
 import qualified Development.IDE.GHC.ExactPrint    as ExactPrint
 import qualified Development.IDE.Plugin.CodeAction as Refactor
+import           GHC.Clock                         (getMonotonicTime)
 import           Ide.Logger
 import           Ide.Plugin.Config
 import qualified Ide.Plugin.Retrie                 as Retrie
 import           System.FilePath
 import           Test.Hls
+import qualified Test.Hls.FileSystem               as FS
+import           Text.Printf                       (printf)
 
 data LogWrap
     = RetrieLog Retrie.Log
@@ -41,6 +46,7 @@ tests =
     [ inlineThisTests
     , unfoldTests
     , foldTests
+    , benchmarkTests
     ]
 
 -- These tests follow the convention that an expression @e@ is being inlined
@@ -231,3 +237,100 @@ testPlugins =
 
 testDataDir :: FilePath
 testDataDir = "plugins" </> "hls-retrie-plugin" </> "test" </> "testdata"
+
+-------------------------------------------------------------------------------
+-- Benchmark
+
+-- | Timings for the two halves of the inline action on a long module: the
+-- code action request (the provider) and resolving the chosen action. The
+-- use being inlined sits in the last function of the module, so the walk
+-- from the top of the module to the cursor is as long as it gets.
+--
+-- The timings include the LSP round trip, so they are for comparing one
+-- change against another rather than absolute figures. They are reported
+-- next to the test name; run just these with @-p Benchmark@.
+benchmarkTests :: TestTree
+benchmarkTests =
+  testGroup "Benchmark"
+    [ testCaseInfo "provider" $ runBench $ \doc -> do
+        timings <- measure $ do
+          actions <- getCodeActions doc (Range benchPosition benchPosition)
+          liftIO $ map codeActionTitle actions @?= [Just "Inline e"]
+        pure $ report "code action request" timings
+    , testCaseInfo "resolve" $ runBench $ \doc -> do
+        actions <- getCodeActions doc (Range benchPosition benchPosition)
+        ca <- liftIO $ case [ca | InR ca@CodeAction{_title = "Inline e"} <- actions] of
+          [ca] -> pure ca
+          cas  -> assertFailure $ "One Inline e action expected, got " <> show (length cas)
+        -- resolve only: the document is left untouched, so every run does
+        -- the same work
+        timings <- measure $ do
+          CodeAction{_edit} <- resolveCodeAction ca
+          liftIO $ assertBool "resolved action carries an edit" (isJust _edit)
+        pure $ report "code action resolve" timings
+    ]
+
+runBench :: (TextDocumentIdentifier -> Session String) -> IO String
+runBench act = runSessionWithTestConfig def
+    { testDirLocation = Right benchTree
+    , testConfigCaps = codeActionResolveCaps
+    , testPluginDescriptor = testPlugins
+    } $ \_ -> do
+      doc <- openDoc "Bench.hs" "haskell"
+      _ <- waitForTypecheck doc
+      act doc
+
+benchTree :: FS.VirtualFileTree
+benchTree = FS.mkVirtualFileTree testDataDir
+    [ FS.directCradle ["Bench.hs"]
+    , FS.file "Bench.hs" (FS.sources benchModule)
+    ]
+
+-- | Run the action once to warm up, then time 'benchRuns' runs of it.
+measure :: Session () -> Session [Double]
+measure act = do
+    act
+    replicateM benchRuns $ do
+      start <- liftIO getMonotonicTime
+      act
+      end <- liftIO getMonotonicTime
+      pure (end - start)
+
+benchRuns :: Int
+benchRuns = 5
+
+report :: String -> [Double] -> String
+report what ts =
+    printf "%s: min %.1f ms, mean %.1f ms over %d runs"
+      what (1000 * minimum ts) (1000 * sum ts / fromIntegral (length ts)) (length ts)
+
+-- | How many functions the generated module has.
+benchFunctions :: Int
+benchFunctions = 300
+
+-- | A module of 'benchFunctions' functions, each using @e@ several times.
+benchModule :: [Text]
+benchModule =
+    [ "module Bench where"
+    , ""
+    , "e :: Int -> Int"
+    , "e x = x + 1"
+    ] ++ concatMap function [0 .. benchFunctions - 1]
+  where
+    function :: Int -> [Text]
+    function i =
+      [ ""
+      , "f" <> n <> " :: Int -> Int"
+      , "f" <> n <> " x ="
+      , "    let y = e x * " <> n
+      , "        z = y + e (x + 1)"
+      , "    in if y > z then e (y - z) else e (z - y)"
+      ]
+      where n = T.pack (show i)
+
+-- | The @e@ of @let y = e x@ in the last function of 'benchModule'.
+benchPosition :: Position
+benchPosition = Position (fromIntegral line) 12
+  where
+    -- four header lines, six lines per function, the let on the fourth
+    line = 4 + 6 * (benchFunctions - 1) + 3
