@@ -52,8 +52,7 @@ import           Development.IDE.Core.Shake           (ShakeExtras (ShakeExtras,
                                                        getShakeExtras,
                                                        hiedbWriter,
                                                        toKnownFiles, withHieDb)
-import           Development.IDE.GHC.Compat           (GRHSs (GRHSs),
-                                                       GenLocated (L), GhcPs,
+import           Development.IDE.GHC.Compat           (GenLocated (L), GhcPs,
                                                        GhcRn,
                                                        HsBindLR (FunBind, fun_matches),
                                                        HsExpr, HsGroup (..),
@@ -76,8 +75,7 @@ import           Development.IDE.GHC.Compat.Util      hiding (catch, toList,
                                                        try)
 import           Development.IDE.GHC.ExactPrint       (GetAnnotatedParsedSource (GetAnnotatedParsedSource),
                                                        TransformT)
-import           Development.IDE.Spans.AtPoint        (LookupModule,
-                                                       nameToLocation)
+import           Development.IDE.Spans.AtPoint        (nameToLocation)
 import           Development.IDE.Types.Shake          (WithHieDb)
 import           GHC                                  (ExprLStmt, GRHS (GRHS),
                                                        GRHSs (grhssGRHSs),
@@ -86,6 +84,7 @@ import           GHC                                  (ExprLStmt, GRHS (GRHS),
                                                        HsLocalBindsLR (HsValBinds),
                                                        HsRecFields, LIdP,
                                                        LocatedA, LocatedN,
+                                                       LHsBind, LMatch,
                                                        Match (m_grhss),
                                                        MatchGroup (mg_alts),
                                                        Module, ModuleName,
@@ -533,7 +532,7 @@ suggestBindRewrites originatingFile pos ms_mod FunBind {fun_id = L (locA -> l') 
      in [unfoldRewrite, foldRewrite]
 suggestBindRewrites _ _ _ _ = []
 
--- find all the identifiers in the AST for which have source definitions
+-- | The identifiers at the cursor that have source definitions.
 suggestBindInlines
   :: Uri
   -> [HsBindLR GhcRn GhcRn]
@@ -542,7 +541,7 @@ suggestBindInlines
   -> (FilePath -> ModuleName -> Unit -> Bool -> MaybeT IdeAction Uri)
   -> IdeAction [(T.Text, RunRetrieInlineThisParams)]
 suggestBindInlines _uri binds range hie lookupMod = do
-    identifiers <- definedIdentifiers
+    identifiers <- concat <$> mapM resolveCandidate (concatMap (candidates False) binds)
     return $ map (\(name, siteLoc, srcLoc) ->
         let
             title = "Inline " <> printedName
@@ -554,44 +553,77 @@ suggestBindInlines _uri binds range hie lookupMod = do
                 }
         in (title, params)
         )
-        (Set.toList identifiers)
+        (Set.toList (Set.fromList identifiers))
     where
-      definedIdentifiers =
-        -- we search for candidates to inline in RHSs only, skipping LHSs
-        everything (<>) (pure mempty `mkQ` getGRHSIdentifierDetails hie lookupMod) binds
+      pos = range ^. L.start
 
-      getGRHSIdentifierDetails ::
-        WithHieDb
-        -> (FilePath -> ModuleName -> Unit -> Bool -> MaybeT IdeAction Uri)
-        -> GRHSs GhcRn (LHsExpr GhcRn)
-        -> IdeAction (Set.HashSet (OccName, Location, Location))
-      getGRHSIdentifierDetails a b it@GRHSs{} =
-        -- we only select candidates for which we have source code
-        everything (<>) (pure mempty `mkQ` getDefinedIdentifierDetailsViaHieDb a b `extQ` getLocalBinderDetails) it
+      -- Walk down to the cursor, skipping subtrees that cannot hold it. We
+      -- search for candidates to inline in RHSs only, skipping LHSs.
+      candidates :: Bool -> GenericQ [Candidate]
+      candidates inRhs x
+        | offCursor x = []
+        | otherwise   = here ++ concat (gmapQ (candidates inRhs') x)
+        where
+          inRhs' = inRhs || isGRHSs x
+          here | inRhs     = ([] `mkQ` occurrence `extQ` localBinder) x
+               | otherwise = []
+
+      isGRHSs :: GenericQ Bool
+      isGRHSs = False `mkQ` grhss
+        where
+          grhss :: GRHSs GhcRn (LHsExpr GhcRn) -> Bool
+          grhss _ = True
+
+      -- a located node that does not hold the cursor: nothing beneath it can
+      offCursor :: GenericQ Bool
+      offCursor = False `mkQ` expr `extQ` match `extQ` bind `extQ` stmt
+        where
+          expr :: LHsExpr GhcRn -> Bool
+          expr = away . getLocA
+          match :: LMatch GhcRn (LHsExpr GhcRn) -> Bool
+          match = away . getLocA
+          bind :: LHsBind GhcRn -> Bool
+          bind = away . getLocA
+          stmt :: ExprLStmt GhcRn -> Bool
+          stmt = away . getLocA
+          -- keep descending through nodes without a real span
+          away l = case srcSpanToRange l of
+            Just (Range s e) -> not (s <= pos && pos <= e)
+            Nothing          -> False
 
       -- a local binder is its own definition: inline it into every use
-      getLocalBinderDetails :: HsBindLR GhcRn GhcRn -> IdeAction (Set.HashSet (OccName, Location, Location))
-      getLocalBinderDetails FunBind{fun_id}
+      localBinder :: HsBindLR GhcRn GhcRn -> [Candidate]
+      localBinder FunBind{fun_id}
         | Just defLoc <- srcSpanToLocation (getLocA fun_id)
         , range `isSubrangeOf` getLocationRange defLoc =
-            pure $ Set.singleton (nameOccName (unLoc fun_id), defLoc, defLoc)
-      getLocalBinderDetails _ = pure mempty
+            [LocalBinder (nameOccName (unLoc fun_id)) defLoc]
+      localBinder _ = []
 
 #if MIN_VERSION_ghc(9,13,0)
-      getDefinedIdentifierDetailsViaHieDb :: WithHieDb -> LookupModule IdeAction -> LIdOccP GhcRn -> IdeAction (Set.HashSet (OccName, Location, Location))
+      occurrence :: LIdOccP GhcRn -> [Candidate]
 #else
-      getDefinedIdentifierDetailsViaHieDb :: WithHieDb -> LookupModule IdeAction -> LIdP GhcRn -> IdeAction (Set.HashSet (OccName, Location, Location))
+      occurrence :: LIdP GhcRn -> [Candidate]
 #endif
-      getDefinedIdentifierDetailsViaHieDb withHieDb lookupModule lname
-        | name <- getName (unLoc lname) =
-        case srcSpanToLocation (getLocA lname) of
-            Just siteLoc
-              | siteRange <- getLocationRange siteLoc
-              , range `isSubrangeOf` siteRange -> do
-                    srcLocations <- nameToLocation withHieDb lookupModule name
-                    equations <- filterM (equationBound name) (fromMaybe [] srcLocations)
-                    return $ Set.fromList (map (nameOccName name, siteLoc,) equations)
-            _ -> pure mempty
+      occurrence lname
+        | Just siteLoc <- srcSpanToLocation (getLocA lname)
+        , range `isSubrangeOf` getLocationRange siteLoc =
+            [Occurrence (getName (unLoc lname)) siteLoc]
+        | otherwise = []
+
+      -- we only select candidates for which we have source code
+      resolveCandidate :: Candidate -> IdeAction [(OccName, Location, Location)]
+      resolveCandidate (LocalBinder occ loc) = pure [(occ, loc, loc)]
+      resolveCandidate (Occurrence name siteLoc) = do
+        srcLocations <- nameToLocation hie lookupMod name
+        equations <- filterM (equationBound name) (fromMaybe [] srcLocations)
+        pure (map (nameOccName name, siteLoc,) equations)
+
+-- | Something at the cursor that might be inlined.
+data Candidate
+  = Occurrence Name Location
+    -- ^ A use of a name, and where the use is.
+  | LocalBinder OccName Location
+    -- ^ A where or let binder, and where it is defined.
 
 -- | Whether name is defined by a regular ValBind (i.e. it's not a class
 -- method, field, constructor, pattern synonym, etc).
