@@ -79,6 +79,7 @@ import           Development.IDE.GHC.ExactPrint       (GetAnnotatedParsedSource 
 import           Development.IDE.Spans.AtPoint        (nameToLocation)
 import           Development.IDE.Types.Shake          (WithHieDb)
 import           GHC                                  (ExprLStmt, GRHS (GRHS),
+                                                       HsModule (hsmodDecls),
                                                        LHsDecl,
                                                        GRHSs (grhssGRHSs),
                                                        GeneralFlag (Opt_Haddock, Opt_KeepRawTokenStream),
@@ -273,13 +274,13 @@ resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = ExceptT $ do
     let
         annotatedImports = renderImports imports
         uri = filePathToUri $ fromNormalizedFilePath nfp
-    fixedSrc <- liftIO $ transformA (unsafeMkA (makeDeltaAst astSrc) 0) (fix sourceFixities)
     inlineRewrite <- liftIO $
-      constructInlineFromIdentifer annotatedImports fixedSrc fromRange
+      constructInlineFromIdentifer sourceFixities annotatedImports
+        (unsafeMkA (makeDeltaAst astSrc) 0) fromRange
     when (null inlineRewrite) $ throwError $ PluginInternalError "Empty rewrite"
     (session, _) <- runActionE "retrie" state $
       useWithStaleE GhcSessionDeps nfp
-    cpp <- liftIO $ getCPPmodule recorder state (hscEnv session) targetFixities $ fromNormalizedFilePath nfp
+    cpp <- liftIO $ getCPPmodule recorder state (hscEnv session) targetFixities site $ fromNormalizedFilePath nfp
     let rewrites = maybe inlineRewrite (\s -> map (headAt s) inlineRewrite) site
         inline
           | isExternalName (unLoc fun_id) = Inline updateContext rewrites
@@ -800,7 +801,7 @@ callRetrie recorder state session spec origin binds = do
     tct <- ExceptT $ try $ useOrFail state "retrie.check" NoTypeCheck TypeCheck nt
     targetFixities <- ExceptT $ try $ fixityEnvForFile state nt
     cpp <- ExceptT $ try $
-      getCPPmodule recorder state session targetFixities t
+      getCPPmodule recorder state session targetFixities Nothing t
     imps <- either (throwError . CannotImport nt) pure $
       extractImports tcd tct binds spec
     (_, cpp', change) <- lift $ runRetrie (originFixities <> targetFixities) retrie cpp
@@ -875,11 +876,12 @@ constructfromFunMatches imps fun_id fun_matches = do
 
 constructInlineFromIdentifer
   :: Data a
-  => AnnotatedImports
+  => FixityEnv
+  -> AnnotatedImports
   -> Annotated (GenLocated l a)
   -> RealSrcSpan
   -> IO [Rewrite Universe]
-constructInlineFromIdentifer imports originParsedModule originSpan = do
+constructInlineFromIdentifer fixities imports originParsedModule originSpan = do
   fmap astA $ transformA originParsedModule $ \(L _ m) -> do
     let
       ast = everything (<>) (First Nothing `mkQ` matcher) m
@@ -894,8 +896,10 @@ constructInlineFromIdentifer imports originParsedModule originSpan = do
           First $ Just (fun_id, fun_matches)
       matcher _ = First Nothing
     case ast of
-      First (Just (fun_id, fun_matches)) ->
-        constructfromFunMatches imports fun_id fun_matches
+      First (Just (fun_id, fun_matches)) -> do
+        -- only the definition being inlined needs reassociating
+        fixed <- fix fixities fun_matches
+        constructfromFunMatches imports fun_id fixed
       _ -> return $ error "could not find source code to inline"
 
 -- | Group 'TextEdit's by file.
@@ -951,15 +955,27 @@ deriving instance FromJSON RewriteSpec
 
 deriving instance ToJSON RewriteSpec
 
--- | Parsed source of a file, reassociated with the given fixities.
+-- | Reassociate the declaration holding the site, or the whole module when
+-- there is no site. Nothing outside that declaration is matched against,
+-- and a subtree left as parsed prints as it was parsed.
+fixAt :: MonadIO m => Maybe RealSrcSpan -> FixityEnv -> ParsedSource -> TransformT m ParsedSource
+fixAt Nothing env m = fix env m
+fixAt (Just site) env (L l m) = do
+  decls <- forM (hsmodDecls m) $ \d ->
+    if RealSrcSpan site Nothing `isSubspanOf` getLocA d then fix env d else pure d
+  pure (L l m { hsmodDecls = decls })
+
+-- | Parsed source of a file, reassociated with the given fixities at the
+-- site, or throughout when there is no site.
 getCPPmodule
   :: Recorder (WithPriority Log)
   -> IdeState
   -> HscEnv
   -> FixityEnv
+  -> Maybe RealSrcSpan
   -> FilePath
   -> IO (CPP AnnotatedModule)
-getCPPmodule recorder state session fixities t = do
+getCPPmodule recorder state session fixities site t = do
   -- TODO: is it safe to drop this makeAbsolute?
   let nt = toNormalizedFilePath' $ (toAbsolute $ rootDir state) t
   let parseWith contents = do
@@ -978,7 +994,7 @@ getCPPmodule recorder state session fixities t = do
         logWith recorder Info $ LogParsingModule t
         parsed <- evalGhcEnv session (parseModule ms')
             `catch` \e -> throwIO (GHCParseError nt (show @SomeException e))
-        transformA (fixAnns parsed) (fix fixities)
+        transformA (fixAnns parsed) (fixAt site fixities)
 
   contents <- do
     mbContentsVFS <-
@@ -990,4 +1006,4 @@ getCPPmodule recorder state session fixities t = do
   let extensions = extensionFlags (ms_hspp_opts (pm_mod_summary pm))
   if LangExt.Cpp `EnumSet.member` extensions
     then parseCPP parseWith contents
-    else NoCPP <$> transformA (fixAnns pm) (fix fixities)
+    else NoCPP <$> transformA (fixAnns pm) (fixAt site fixities)
