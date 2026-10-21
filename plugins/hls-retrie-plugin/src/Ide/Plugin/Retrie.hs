@@ -27,6 +27,7 @@ import           Control.Monad.Trans.Except           (ExceptT (..), runExceptT)
 import           Data.Maybe                           (fromMaybe, isJust,
                                                        isNothing)
 
+import           Control.Monad.Trans.Writer.Strict    (runWriterT)
 import           Control.Monad.Trans.Maybe            (MaybeT, hoistMaybe,
                                                        runMaybeT)
 import           Data.Aeson                           (FromJSON (..),
@@ -78,6 +79,7 @@ import           Development.IDE.GHC.ExactPrint       (GetAnnotatedParsedSource 
 import           Development.IDE.Spans.AtPoint        (nameToLocation)
 import           Development.IDE.Types.Shake          (WithHieDb)
 import           GHC                                  (ExprLStmt, GRHS (GRHS),
+                                                       LHsDecl,
                                                        GRHSs (grhssGRHSs),
                                                        GeneralFlag (Opt_Haddock, Opt_KeepRawTokenStream),
                                                        HsLocalBinds,
@@ -120,7 +122,6 @@ import           Retrie                               (Annotated (astA),
                                                        AnnotatedModule, Options,
                                                        Options_ (..),
                                                        Verbosity (Loud), apply,
-                                                       applyWithUpdate,
                                                        applyWithUpdateAndStrategy,
                                                        topDown)
 import           Retrie.Context
@@ -132,17 +133,19 @@ import           Retrie.ExactPrint                    (AnnotatedImports, fix,
                                                        unsafeMkA)
 import           Retrie.Expr                          (mkLocatedHsVar)
 import           Retrie.Fixity                        (FixityEnv, mkFixityEnv)
-import           Retrie.Monad                         (Retrie, getGroundTerms,
-                                                       runRetrie)
+import           Retrie.Monad                         (getGroundTerms,
+                                                       runRetrie, topDownPrune)
 import           Retrie.Options                       (defaultOptions,
                                                        getTargetFiles)
 import           Retrie.Replace                       (Change (..),
-                                                       Replacement (..))
+                                                       Replacement (..),
+                                                       replace)
 import           Retrie.Rewrites
 import           Retrie.Rewrites.Function             (matchToRewrites)
 import           Retrie.Substitution                  (HoleVal (HoleExpr),
                                                        foldSubst)
 import           Retrie.SYB                           (GenericQ, everything,
+                                                       everywhereMWithContextBut,
                                                        extQ, listify, mkQ)
 import           Retrie.Types
 import           Retrie.Universe                      (Universe)
@@ -279,17 +282,16 @@ resolveInlineThis recorder state ca RunRetrieInlineThisParams{..} = ExceptT $ do
     cpp <- liftIO $ getCPPmodule recorder state (hscEnv session) targetFixities $ fromNormalizedFilePath nfp
     let rewrites = maybe inlineRewrite (\s -> map (headAt s) inlineRewrite) site
         inline
-          | isExternalName (unLoc fun_id) =
-              applyAt site updateContext rewrites
-          | otherwise = applyLocal site fromRange rewrites
+          | isExternalName (unLoc fun_id) = Inline updateContext rewrites
+          | otherwise = localInline fromRange rewrites
     result <- liftIO $ try @_ @SomeException $
-        runRetrie (sourceFixities <> targetFixities) inline cpp
+        applyInline (sourceFixities <> targetFixities) site inline cpp
     case result of
         Left err -> throwError $ PluginInternalError $ "Retrie - crashed with: " <> T.pack (show err)
         -- a refused site is not an error: leave the action without an edit
-        Right (_,_,NoChange) ->
+        Right (_,NoChange) ->
             refuse "Not inlined: the call site did not match the definition, or a binding there would capture one of its variables"
-        Right (_,cpp',change) -> do
+        Right (cpp',change) -> do
             let edits = asEditMap $ asTextEdits uri cpp cpp' change
                 wedit = WorkspaceEdit (Just edits) Nothing Nothing
             return $ ca & L.edit ?~ wedit
@@ -345,9 +347,16 @@ triviallySelectable mg = case unLoc (mg_alts mg) of
     wildcardCon :: HsRecFields GhcRn (LHsExpr GhcRn) -> Bool
     wildcardCon = isJust . recDotDot
 
--- | Only install rewrites when the target subtree has been reached.
-applyLocal :: Maybe RealSrcSpan -> RealSrcSpan -> [Rewrite Universe] -> Retrie ()
-applyLocal site defSpan rewrites = applyAt site updater moduleRewrites
+-- | The rewrites of an inline, and the context updater that scopes them.
+data Inline = Inline
+  { inlineUpdater  :: ContextUpdater
+  , inlineRewrites :: [Rewrite Universe]
+  }
+
+-- | Inline a local binder: the rewrites are attached at the subtree that
+-- binds the definition, so that they see its scope.
+localInline :: RealSrcSpan -> [Rewrite Universe] -> Inline
+localInline defSpan rewrites = Inline updater moduleRewrites
   where
     -- retrie will exit early if there are no rewrites, so just stub them out
     -- at the top level.
@@ -385,9 +394,53 @@ applyLocal site defSpan rewrites = applyAt site updater moduleRewrites
            , RealSrcSpan sp _ <- [getLocA fun_id] ]
     definesIt _ = False
 
-applyAt :: Maybe RealSrcSpan -> ContextUpdater -> [Rewrite Universe] -> Retrie ()
-applyAt (Just site) update = applyWithUpdate (atSite site update)
-applyAt Nothing update     = applyWithUpdateAndStrategy update topDown
+-- | Apply the inline at the site, or at every use when there is no site.
+applyInline
+  :: FixityEnv
+  -> Maybe RealSrcSpan
+  -> Inline
+  -> CPP AnnotatedModule
+  -> IO (CPP AnnotatedModule, Change)
+applyInline fixities (Just site) Inline{inlineUpdater, inlineRewrites} cpp =
+  applyAtSite fixities site inlineUpdater inlineRewrites cpp
+applyInline fixities Nothing Inline{inlineUpdater, inlineRewrites} cpp = do
+  (_, cpp', change) <- runRetrie fixities
+    (applyWithUpdateAndStrategy inlineUpdater topDown inlineRewrites) cpp
+  pure (cpp', change)
+
+-- | Apply the rewrites along the path to the site only.
+--
+-- A rewrite can only fire at a node that holds the site, so a located
+-- declaration or expression that does not hold it is never entered. This is
+-- retrie's 'applyWithUpdate' with the traversal's stop predicate filled in.
+-- Unlike 'runRetrie' it does not first narrow the modules by ground terms,
+-- which makes no difference for the single module given here.
+applyAtSite
+  :: FixityEnv
+  -> RealSrcSpan
+  -> ContextUpdater
+  -> [Rewrite Universe]
+  -> CPP AnnotatedModule
+  -> IO (CPP AnnotatedModule, Change)
+applyAtSite fixities site update rewrites cpp =
+  runWriterT $ traverse (`transformA` walk) cpp
+  where
+    walk =
+      everywhereMWithContextBut topDownPrune offSite (atSite site update) replace
+        (emptyContext fixities rewriter dependents)
+
+    rewriter   = foldMap mkRewriter rewrites
+    dependents = foldMap mkRewriter (rewritesWithDependents rewrites)
+
+    -- a located node that does not hold the site: nothing beneath it can
+    offSite :: GenericQ Bool
+    offSite = False `mkQ` decl `extQ` expr
+      where
+        decl :: LHsDecl GhcPs -> Bool
+        decl = away . getLocA
+        expr :: LHsExpr GhcPs -> Bool
+        expr = away . getLocA
+        away l = not (RealSrcSpan site Nothing `isSubspanOf` l)
 
 -- | In the case of nested matches, such as @f (f x)@, the cursor on the inner
 -- @f@ matches both the inner and outer applications. If a match occurs within
