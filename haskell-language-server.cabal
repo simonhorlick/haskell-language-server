@@ -720,12 +720,10 @@ library hls-retrie-plugin
   build-depends:
     , filepath
     , aeson
-    , bytestring
     , containers
     , deepseq
     , extra
     , ghc
-    , ghc-boot-th
     , ghc-exactprint
     , ghcide                == 2.15.0.0
     , hashable
@@ -741,7 +739,6 @@ library hls-retrie-plugin
     , stm
     , syb
     , text
-    , text-rope
     , transformers
     , unliftio-core
     , unordered-containers

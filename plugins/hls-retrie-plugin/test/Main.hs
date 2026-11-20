@@ -96,6 +96,7 @@ inlineThisTests =
       , testInline "comment in an argument" "CommentArg" 7 6
       , testInline "comment in an argument with cpp" "CommentArgCpp" 9 6
       , testInline "rewrite spanning a cpp directive" "CppStraddle" 9 6
+      , testInline "where to let, CPP module" "WhereToLetCpp" 9 6
       ]
     , testGroup "refused"
       [ testRefused "multi clause" "MultiClause" 7 4 notSelectable
@@ -132,7 +133,7 @@ unfoldTests :: TestTree
 unfoldTests =
   testGroup "Unfold"
     [ testUnfold "top level function" "Identity" 4 0
-    , testUnfold "cpp branches" "CPP" 5 0
+    , testUnfold "active cpp branch only" "CPP" 5 0
     , testUnfold "comment in the definition" "UnfoldComment" 4 0
 
       -- The action is run in the defining module, but the changes all happen
