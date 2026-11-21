@@ -94,7 +94,8 @@ inlineThisTests =
       , testInline "single clause pattern" "Pattern" 5 4
       , testInline "rename let binding" "Capture" 7 6
       , testInline "comment in an argument" "CommentArg" 7 6
-      , testInline "comment in an argument, CPP module" "CommentArgCpp" 9 6
+      , testInline "comment in an argument with cpp" "CommentArgCpp" 9 6
+      , testInline "rewrite spanning a cpp directive" "CppStraddle" 9 6
       ]
     , testGroup "refused"
       [ testRefused "multi clause" "MultiClause" 7 4 notSelectable
